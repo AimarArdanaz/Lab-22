@@ -1,32 +1,32 @@
-# Pipeline de análisis 16S rRNA — Comunidad sintética 
+# 16S rRNA Analysis Pipeline — Synthetic Community
 
-Código completo y reproducible del análisis de la comunidad microbiana sintética (9 especies, basada en Lekbua et al. 2024, *Cell Rep Methods* 4:100832), comparando tres condiciones experimentales: **pHD17** (cepa con plásmido, gen *bap* funcional), **Dbap** (cepa con plásmido, *bap* mutado) y **PF** (cepa sin plásmido). 4 réplicas por condición, 12 muestras totales, secuenciación 16S rRNA.
+Complete, reproducible code for the analysis of the synthetic microbial community (9 species, based on Lekbua et al. 2024, *Cell Rep Methods* 4:100832), comparing three experimental conditions: **pHD17** (plasmid-carrying strain, functional *bap* gene), **Dbap** (plasmid-carrying strain, mutated *bap*) and **PF** (plasmid-free strain). 4 replicates per condition, 12 samples total, 16S rRNA sequencing.
 
-Este documento reúne, en orden de ejecución, todo el código usado desde la construcción de la base de datos de referencia hasta el análisis de abundancia diferencial final. Se publica junto con el manuscrito como material suplementario reproducible.
+This document collects, in execution order, all the code used from building the reference database through to the final differential abundance analysis. It is published alongside the manuscript as reproducible supplementary material.
 
-## Tabla de contenidos
+## Table of contents
 
-1. [Entorno y dependencias](#1-entorno-y-dependencias)
-2. [Construcción de la base de datos de referencia 16S](#2-construcción-de-la-base-de-datos-de-referencia-16s)
-3. [Recorte de primers (cutadapt)](#3-recorte-de-primers-cutadapt)
-4. [DADA2: de lecturas crudas a ASVs](#4-dada2-de-lecturas-crudas-a-asvs)
-5. [Asignación taxonómica (SILVA + BLAST)](#5-asignación-taxonómica-silva--blast)
-6. [Árbol filogenético (opcional)](#6-árbol-filogenético-opcional)
-7. [Construcción del objeto phyloseq](#7-construcción-del-objeto-phyloseq)
-8. [Filtrado de calidad y prevalencia](#8-filtrado-de-calidad-y-prevalencia)
-9. [Diversidad alfa](#9-diversidad-alfa)
-10. [Diversidad beta (Aitchison/CLR)](#10-diversidad-beta-aitchisonclr)
-11. [Curvas de rarefacción](#11-curvas-de-rarefacción)
-12. [Composición: barras, bubble plot, heatmap, Venn, UpSet](#12-composición-barras-bubble-plot-heatmap-venn-upset)
-13. [Abundancia diferencial: LEfSe, ANOVA, ANCOM, ANCOM-BC2](#13-abundancia-diferencial-lefse-anova-ancom-ancom-bc2)
-14. [Problemas conocidos de los paquetes y soluciones aplicadas](#14-problemas-conocidos-de-los-paquetes-y-soluciones-aplicadas)
-15. [Reproducibilidad](#15-reproducibilidad)
+1. [Environment and dependencies](#1-environment-and-dependencies)
+2. [Building the 16S reference database](#2-building-the-16s-reference-database)
+3. [Primer trimming (cutadapt)](#3-primer-trimming-cutadapt)
+4. [DADA2: from raw reads to ASVs](#4-dada2-from-raw-reads-to-asvs)
+5. [Taxonomic assignment (SILVA + BLAST)](#5-taxonomic-assignment-silva--blast)
+6. [Phylogenetic tree (optional)](#6-phylogenetic-tree-optional)
+7. [Building the phyloseq object](#7-building-the-phyloseq-object)
+8. [Quality and prevalence filtering](#8-quality-and-prevalence-filtering)
+9. [Alpha diversity](#9-alpha-diversity)
+10. [Beta diversity (Aitchison/CLR)](#10-beta-diversity-aitchisonclr)
+11. [Rarefaction curves](#11-rarefaction-curves)
+12. [Composition: bar plots, bubble plot, heatmap, Venn, UpSet](#12-composition-bar-plots-bubble-plot-heatmap-venn-upset)
+13. [Differential abundance: LEfSe, ANOVA, ANCOM, ANCOM-BC2](#13-differential-abundance-lefse-anova-ancom-ancom-bc2)
+14. [Known package issues and applied fixes](#14-known-package-issues-and-applied-fixes)
+15. [Reproducibility](#15-reproducibility)
 
 ---
 
-## 1. Entorno y dependencias
+## 1. Environment and dependencies
 
-### Herramientas de línea de comandos (conda/mamba)
+### Command-line tools (conda/mamba)
 
 ```bash
 mamba install -c conda-forge -c bioconda ncbi-datasets-cli entrez-direct barrnap seqkit unzip
@@ -34,7 +34,7 @@ mamba install -c bioconda cutadapt
 mamba activate bioinfo
 ```
 
-### Paquetes de R utilizados
+### R packages used
 
 ```r
 library(dada2)
@@ -68,44 +68,44 @@ library(DT)
 
 ---
 
-## 2. Construcción de la base de datos de referencia 16S
+## 2. Building the 16S reference database
 
-Antes de poder asignar taxonomía a nivel de especie hace falta una base de referencia curada con el gen 16S de las 9 cepas concretas de SkinCom (no basta con SILVA genérico, que solo resuelve bien hasta género). `skincom_16S.sh` descarga el genoma de cada cepa desde NCBI, extrae el 16S con `barrnap`, y filtra por longitud (1300–1700 pb) para descartar fragmentos parciales.
+Before species-level taxonomy can be assigned, a curated reference database with the 16S gene of the 9 specific SkinCom strains is needed (generic SILVA is not enough — it only resolves well down to genus). `skincom_16S.sh` downloads each strain's genome from NCBI, extracts the 16S with `barrnap`, and filters by length (1300–1700 bp) to discard partial fragments.
 
 ```bash
 #!/usr/bin/env bash
 # =====================================================================
 # skincom_16S.sh
-# Obtiene el 16S rRNA de las 9 cepas de SkinCom (Lekbua et al. 2024,
-# Cell Rep Methods 4:100832) a partir de sus genomas en NCBI.
+# Retrieves the 16S rRNA of the 9 SkinCom strains (Lekbua et al. 2024,
+# Cell Rep Methods 4:100832) from their genomes on NCBI.
 #
-# Dependencias (ej. con conda/mamba):
+# Dependencies (e.g. with conda/mamba):
 #   mamba install -c conda-forge -c bioconda ncbi-datasets-cli \
 #         entrez-direct barrnap seqkit unzip
 #
-# Uso:
-#   bash skincom_16S.sh                # todo con valores por defecto
-#   THREADS=8 OUT=mi_carpeta bash skincom_16S.sh
+# Usage:
+#   bash skincom_16S.sh                # everything with default values
+#   THREADS=8 OUT=my_folder bash skincom_16S.sh
 #
-# Si una cepa no se encuentra o el genoma elegido no es el correcto,
-# edita OUT/cepas.tsv (4ª columna = accession manual, ej. GCF_000008345.1)
-# y vuelve a lanzar el script: reutiliza lo ya descargado.
+# If a strain isn't found or the chosen genome isn't the right one,
+# edit OUT/cepas.tsv (4th column = manual accession, e.g. GCF_000008345.1)
+# and re-run the script: it reuses whatever was already downloaded.
 # =====================================================================
 set -uo pipefail
 
 THREADS=${THREADS:-4}
 OUT=${OUT:-skincom_16S}
-MINLEN=1300     # el 16S completo mide ~1500 pb; descarta hits parciales
+MINLEN=1300     # the full 16S is ~1500 bp; discards partial hits
 MAXLEN=1700
 
 for x in datasets esearch efetch esummary xtract barrnap seqkit unzip awk; do
-  command -v "$x" >/dev/null 2>&1 || { echo "ERROR: falta '$x' en el PATH" >&2; exit 1; }
+  command -v "$x" >/dev/null 2>&1 || { echo "ERROR: missing '$x' in PATH" >&2; exit 1; }
 done
 
 mkdir -p "$OUT"/{genomes,per_strain,fallback_nuccore,sin_match}
 
 # ---------------------------------------------------------------------
-# Tabla de cepas: etiqueta | especie | términos de cepa (separados por |) | accession manual ("-" = automático)
+# Strain table: label | species | strain terms (pipe-separated) | manual accession ("-" = automatic)
 # ---------------------------------------------------------------------
 if [[ ! -s "$OUT/cepas.tsv" ]]; then
   printf '%s\t%s\t%s\t%s\n' \
@@ -122,24 +122,24 @@ if [[ ! -s "$OUT/cepas.tsv" ]]; then
 fi
 
 # ---------------------------------------------------------------------
-# Funciones
+# Functions
 # ---------------------------------------------------------------------
-# "A|B" -> "\"A\" OR \"B\"" para Entrez
+# "A|B" -> "\"A\" OR \"B\"" for Entrez
 terms_to_entrez() {
   awk -v t="$1" 'BEGIN{n=split(t,T,"|"); for(i=1;i<=n;i++) printf "%s\"%s\"", (i>1?" OR ":""), T[i]}'
 }
 
-# Lista assemblies de NCBI: acc <TAB> nivel <TAB> nombre <TAB> especie <TAB> valores infraespecíficos
-list_assemblies() {  # $1 = query Entrez
+# List NCBI assemblies: acc <TAB> level <TAB> name <TAB> species <TAB> infraspecific values
+list_assemblies() {  # $1 = Entrez query
   esearch -db assembly -query "$1" </dev/null 2>/dev/null \
     | esummary 2>/dev/null \
     | xtract -pattern DocumentSummary \
         -element AssemblyAccession AssemblyStatus AssemblyName SpeciesName Sub_value
 }
 
-# Elige el mejor assembly cuyo campo de cepa coincida con algún término.
-# Prioridad: Complete Genome > Chromosome > Scaffold > Contig; GCF_ (RefSeq) antes que GCA_.
-pick_assembly() {  # $1 = especie, $2 = términos
+# Picks the best assembly whose strain field matches any term.
+# Priority: Complete Genome > Chromosome > Scaffold > Contig; GCF_ (RefSeq) before GCA_.
+pick_assembly() {  # $1 = species, $2 = terms
   local q; q="\"$1\"[Organism] AND ($(terms_to_entrez "$2")) AND latest[filter]"
   list_assemblies "$q" \
   | awk -F'\t' -v terms="$2" '
@@ -151,7 +151,7 @@ pick_assembly() {  # $1 = especie, $2 = términos
   | sort -k1,1n -k2,2n | head -n 1 | cut -f3,4
 }
 
-download_genome() {  # $1 = accession, $2 = carpeta destino
+download_genome() {  # $1 = accession, $2 = destination folder
   local acc="$1" d="$2"
   [[ -s "$d/genome.fna" ]] && return 0
   mkdir -p "$d"
@@ -162,18 +162,18 @@ download_genome() {  # $1 = accession, $2 = carpeta destino
   rm -rf "$d/pkg" "$d/pkg.zip"
 }
 
-extract_16S() {  # $1 = label, $2 = accession, $3 = carpeta genoma
+extract_16S() {  # $1 = label, $2 = accession, $3 = genome folder
   local label="$1" acc="$2" d="$3"
   barrnap --kingdom bac --threads "$THREADS" --quiet \
       --outseq "$d/rrna.fa" "$d/genome.fna" > "$d/rrna.gff" 2>/dev/null
   seqkit grep -r -n -p '^16S_rRNA' "$d/rrna.fa" 2>/dev/null \
     | seqkit seq -m "$MINLEN" -M "$MAXLEN" 2>/dev/null \
     | awk -v l="$label" -v a="$acc" \
-        '/^>/{ n++; sub(/^>16S_rRNA::/,""); print ">" l "|" a "|copia" n "|" $0; next } { print }' \
+        '/^>/{ n++; sub(/^>16S_rRNA::/,""); print ">" l "|" a "|copy" n "|" $0; next } { print }' \
     > "$OUT/per_strain/$label.16S.fa"
 }
 
-fallback_nuccore() {  # $1 = label, $2 = especie, $3 = términos
+fallback_nuccore() {  # $1 = label, $2 = species, $3 = terms
   local q; q="\"$2\"[Organism] AND ($(terms_to_entrez "$3")) AND 16S ribosomal RNA[Title] AND 1200:1700[SLEN]"
   esearch -db nuccore -query "$q" </dev/null 2>/dev/null | efetch -format fasta 2>/dev/null \
     > "$OUT/fallback_nuccore/$1.nuccore.fa"
@@ -181,9 +181,9 @@ fallback_nuccore() {  # $1 = label, $2 = especie, $3 = términos
 }
 
 # ---------------------------------------------------------------------
-# Bucle principal (fd 3 para que esearch/efetch no consuman el stdin del bucle)
+# Main loop (fd 3 so esearch/efetch don't consume the loop's stdin)
 # ---------------------------------------------------------------------
-printf 'etiqueta\tespecie\tfuente\taccession\tnivel\tn_copias_16S\tn_secuencias_unicas\tlongitud\n' \
+printf 'label\tspecies\tsource\taccession\tlevel\tn_16S_copies\tn_unique_sequences\tlength\n' \
   > "$OUT/resumen.tsv"
 : > "$OUT/accesiones_usadas.tsv"
 
@@ -191,7 +191,7 @@ while IFS=$'\t' read -r label species terms manual <&3; do
   [[ -z "${label:-}" || "$label" == \#* ]] && continue
   echo ">>> $label ($species | $terms)"
 
-  acc=""; level=""; fuente="genoma"
+  acc=""; level=""; fuente="genome"
   if [[ "${manual:--}" != "-" ]]; then
     acc="$manual"; level="manual"
   else
@@ -199,19 +199,19 @@ while IFS=$'\t' read -r label species terms manual <&3; do
   fi
 
   if [[ -n "$acc" ]] && download_genome "$acc" "$OUT/genomes/$acc"; then
-    echo "    genoma: $acc ($level)"
+    echo "    genome: $acc ($level)"
     extract_16S "$label" "$acc" "$OUT/genomes/$acc"
   else
-    echo "    [!] sin genoma para la cepa; guardo candidatos de la especie en sin_match/"
+    echo "    [!] no genome for this strain; saving species candidates in sin_match/"
     list_assemblies "\"$species\"[Organism] AND \"complete genome\"[filter] AND latest[filter]" \
       | head -n 200 > "$OUT/sin_match/$label.candidatos.tsv"
-    acc="-"; level="-"; fuente="nuccore(REVISAR)"
+    acc="-"; level="-"; fuente="nuccore(CHECK)"
     : > "$OUT/per_strain/$label.16S.fa"
     if fallback_nuccore "$label" "$species" "$terms"; then
       awk -v l="$label" '/^>/{ n++; sub(/^>/,""); gsub(/ /,"_"); print ">" l "|nuccore|" n "|" $0; next } { print }' \
         "$OUT/fallback_nuccore/$label.nuccore.fa" > "$OUT/per_strain/$label.16S.fa"
     else
-      fuente="NINGUNA"
+      fuente="NONE"
     fi
   fi
 
@@ -229,7 +229,7 @@ while IFS=$'\t' read -r label species terms manual <&3; do
 done 3< "$OUT/cepas.tsv"
 
 # ---------------------------------------------------------------------
-# FASTA finales
+# Final FASTA files
 # ---------------------------------------------------------------------
 cat "$OUT"/per_strain/*.16S.fa > "$OUT/SkinCom_16S_todas_las_copias.fa"
 : > "$OUT/SkinCom_16S_1_por_cepa.fa"
@@ -238,34 +238,34 @@ for f in "$OUT"/per_strain/*.16S.fa; do
 done
 
 echo
-echo "=== RESUMEN ==="
+echo "=== SUMMARY ==="
 column -t -s $'\t' "$OUT/resumen.tsv"
 echo
-echo "Salidas en $OUT/:"
-echo "  SkinCom_16S_1_por_cepa.fa           (1 copia por cepa)"
-echo "  SkinCom_16S_todas_las_copias.fa     (todas las copias del operón rrn)"
-echo "  resumen.tsv / accesiones_usadas.tsv (para el apartado de métodos)"
-echo "  sin_match/, fallback_nuccore/       (solo si alguna cepa falló: REVISAR a mano)"
+echo "Outputs in $OUT/:"
+echo "  SkinCom_16S_1_por_cepa.fa           (1 copy per strain)"
+echo "  SkinCom_16S_todas_las_copias.fa     (all copies of the rrn operon)"
+echo "  resumen.tsv / accesiones_usadas.tsv (for the methods section)"
+echo "  sin_match/, fallback_nuccore/       (only if some strain failed: CHECK manually)"
 ```
 
-A partir de `SkinCom_16S_1_por_cepa.fa` se construyeron dos bases derivadas: una para `dada2::assignTaxonomy()` (formato SILVA-like, hasta género) y una base BLAST (`blastdb/SkinCom_16S`) para la asignación de especie por coincidencia exacta (ver [sección 5](#5-asignación-taxonómica-silva--blast)).
+From `SkinCom_16S_1_por_cepa.fa` two derived databases were built: one for `dada2::assignTaxonomy()` (SILVA-like format, down to genus) and a BLAST database (`blastdb/SkinCom_16S`) for species assignment by exact match (see [section 5](#5-taxonomic-assignment-silva--blast)).
 
 ---
 
-## 3. Recorte de primers (cutadapt)
+## 3. Primer trimming (cutadapt)
 
-Los primers deben eliminarse antes de DADA2: su presencia interfiere con el solapamiento de lecturas, el modelo de errores y la asignación taxonómica. Región amplificada: V3–V4, primers 341F / 805R.
+Primers must be removed before DADA2: their presence interferes with read overlap, the error model, and taxonomic assignment. Amplified region: V3–V4, primers 341F / 805R.
 
 ```bash
 cd "/mnt/c/AA bioinfo tesis/comunidadmicrobianaepidermidis"
 
-# 1. Lista de muestras
+# 1. Sample list
 ls raw/*_1.fq.gz | xargs -n 1 basename | sed 's/_1\.fq\.gz$//' > samples.txt
 cat samples.txt
 
-# 2. Recorte de primers con cutadapt (por muestra; -g/-G = primer forward/reverse,
-#    -O 15 = solapamiento mínimo, -m 200 = descarta pares que queden más cortos que
-#    eso tras el recorte, --discard-untrimmed = descarta pares sin ambos primers)
+# 2. Primer trimming with cutadapt (per sample; -g/-G = forward/reverse primer,
+#    -O 15 = minimum overlap, -m 200 = discards pairs shorter than that after
+#    trimming, --discard-untrimmed = discards pairs missing either primer)
 cutadapt \
   -g ACTCCTACGGGAGGCAGCA \
   -G GGACTACHVGGGTWTCTAAT \
@@ -276,31 +276,31 @@ cutadapt \
   > stats/cutadapt_primer_trimming_stats.txt
 ```
 
-**Principios generales al ajustar estos parámetros para otro dataset:** comprobar la orientación de los primers, elegir los límites de longitud del amplicón apropiados para el marcador usado, e inspeccionar el informe de recorte antes de continuar — si el recorte sale mal, revisar primero la degeneración y orientación de los primers. Los parámetros a ajustar son las secuencias de primer (`-g`/`-G`, deben coincidir exactamente con el par usado) y los límites `-m`/`-M`, que deben ajustarse a la longitud esperada del amplicón tras el recorte — no copiarlos de otro proyecto sin comprobar.
+**General principles when adjusting these parameters for another dataset:** check primer orientation, choose amplicon length limits appropriate for the marker used, and inspect the trimming report before continuing — if trimming goes wrong, check primer degeneracy and orientation first. The parameters to adjust are the primer sequences (`-g`/`-G`, must exactly match the pair used) and the `-m`/`-M` limits, which must be adjusted to the expected amplicon length after trimming — don't copy them from another project without checking.
 
-**Verificación:** en este dataset, el 99.5% de los pares pasaron el filtro (152,433 → 152,433 pares con ambos primers detectados, 99.6%/99.9% R1/R2), muy por encima del umbral habitual de >90%.
+**Verification:** in this dataset, 99.5% of pairs passed the filter (152,433 → 152,433 pairs with both primers detected, 99.6%/99.9% R1/R2), well above the usual >90% threshold.
 
 ---
 
-## 4. DADA2: de lecturas crudas a ASVs
+## 4. DADA2: from raw reads to ASVs
 
 ```r
 library(dada2)
 
-# Definir la ruta donde están las lecturas recortadas con Cutadapt
+# Define the path where the reads trimmed with Cutadapt are located
 path <- "C:/AA Bioinfo tesis/comunidadmicrobianaepidermidis/raw/trimmed"
 
-# Obtener rutas de los archivos R1 y R2
+# Get the paths of the R1 and R2 files
 fnFs <- sort(list.files(path, pattern = "_R1.trimmed.fastq.gz", full.names = TRUE))
 fnRs <- sort(list.files(path, pattern = "_R2.trimmed.fastq.gz", full.names = TRUE))
 
-# Extraer nombres de las muestras
+# Extract sample names
 sample.names <- sapply(strsplit(basename(fnFs), "_R1"), `[`, 1)
 
-# 4. Inspeccionar perfiles de calidad
-## Ayudan a elegir la longitud de truncado; es uno de los pasos de criterio más
-## importantes del pipeline, porque una mala elección puede destruir el
-## solapamiento o dejar demasiadas bases de baja calidad.
+# 4. Inspect quality profiles
+## These help choose the truncation length; it's one of the most important
+## judgment calls in the pipeline, because a poor choice can destroy read
+## overlap or leave too many low-quality bases.
 if (!dir.exists("stats")) dir.create("stats", recursive = TRUE)
 
 qp_F <- plotQualityProfile(fnFs[1:3])
@@ -315,14 +315,14 @@ qp_R_all <- dada2::plotQualityProfile(fnRs)
 ggplot2::ggsave("stats/quality_profile_forward_all.pdf", qp_F_all, width = 16, height = 12)
 ggplot2::ggsave("stats/quality_profile_reverse_all.pdf", qp_R_all, width = 16, height = 12)
 
-# 5. Filtrado y recorte
-## Elimina lecturas/bases de baja calidad antes del denoising.
+# 5. Filtering and trimming
+## Removes low-quality reads/bases before denoising.
 ##
-## IMPORTANTE: truncLen = c(0,0) es intencional, no un placeholder. Como cutadapt
-## recorta primers tolerando indels, las lecturas resultantes tienen longitud
-## VARIABLE (225-234 pb en este dataset). Un truncLen fijo (p.ej. 230) habría
-## descartado cualquier lectura más corta que ese valor -- en este dataset,
-## eso hubiera tirado ~78% de las lecturas. maxEE es el filtro de calidad real.
+## IMPORTANT: truncLen = c(0,0) is intentional, not a placeholder. Since cutadapt
+## trims primers tolerating indels, the resulting reads have VARIABLE length
+## (225-234 bp in this dataset). A fixed truncLen (e.g. 230) would have
+## discarded any read shorter than that value -- in this dataset,
+## that would have thrown away ~78% of the reads. maxEE is the real quality filter.
 filt_path <- "C:/AA Bioinfo tesis/comunidadmicrobianaepidermidis/raw/trimmed/filtered"
 dir.create(filt_path, showWarnings = FALSE)
 
@@ -333,22 +333,22 @@ out <- filterAndTrim(
   fnFs, filtFs,
   fnRs, filtRs,
   trimLeft = c(0, 0),
-  truncLen = c(0, 0),       # CLAVE: 0 para no destruir el solapamiento tras usar Cutadapt
+  truncLen = c(0, 0),       # KEY: 0 so as not to destroy overlap after using Cutadapt
   maxN = 0,
-  maxEE = c(2, 2),          # El filtro de calidad real: descarta lecturas con >2 errores esperados
+  maxEE = c(2, 2),          # The real quality filter: discards reads with >2 expected errors
   truncQ = 2,
   rm.phix = TRUE,
   compress = TRUE,
-  multithread = FALSE,      # CLAVE: FALSE para que RStudio no se quede colgado en Windows
+  multithread = FALSE,      # KEY: FALSE so RStudio doesn't hang on Windows
   matchIDs = TRUE
 )
 
 head(out)
 write.csv(out, "stats/filterAndTrim_read_tracking.csv")
 
-# 6. Aprender el modelo de error
-## DADA2 modela el error de secuenciación empíricamente para distinguir
-## variantes reales de errores.
+# 6. Learn the error model
+## DADA2 empirically models the sequencing error to distinguish real
+## variants from errors.
 set.seed(100)
 
 errF <- learnErrors(filtFs, nbases = 1e8, multithread = FALSE, randomize = TRUE)
@@ -360,7 +360,7 @@ ep_R <- plotErrors(errR, nominalQ = TRUE)
 ggplot2::ggsave("stats/error_rates_forward.pdf", ep_F, width = 8, height = 6)
 ggplot2::ggsave("stats/error_rates_reverse.pdf", ep_R, width = 8, height = 6)
 
-# 7. Inferencia de ASVs y ensamblaje de pares
+# 7. ASV inference and pair merging
 derepFs <- derepFastq(filtFs)
 derepRs <- derepFastq(filtRs)
 
@@ -373,14 +373,14 @@ dadaRs <- dada(derepRs, err = errR, multithread = FALSE)
 mergers <- mergePairs(dadaFs, derepFs, dadaRs, derepRs, verbose = TRUE)
 head(mergers[[1]])
 
-# 8. Tabla de secuencias y eliminación de quimeras
+# 8. Sequence table and chimera removal
 seqtab.all <- makeSequenceTable(mergers)
 seqtab.nochim <- removeBimeraDenovo(seqtab.all, method = "consensus", multithread = FALSE)
 
 dim(seqtab.nochim)
 table(nchar(getSequences(seqtab.nochim)))
 
-# Seguimiento de lecturas a través de todo el pipeline
+# Read tracking through the whole pipeline
 getN <- function(x) sum(getUniques(x))
 track <- cbind(out, sapply(dadaFs, getN), sapply(dadaRs, getN), sapply(mergers, getN), rowSums(seqtab.nochim))
 colnames(track) <- c("input", "filtered", "denoisedF", "denoisedR", "merged", "nonchim")
@@ -389,16 +389,16 @@ head(track)
 write.csv(track, "sapply_seguimiento_lecturas2.csv", row.names = TRUE)
 ```
 
-**Resultado:** 173 ASVs finales, retención media del 85.7% (input → no quiméricas) en las 12 muestras, sin muestras problemáticas (rango 84.8%–87.0%).
+**Result:** 173 final ASVs, average retention of 85.7% (input → non-chimeric) across the 12 samples, with no problematic samples (range 84.8%–87.0%).
 
 ---
 
-## 5. Asignación taxonómica (SILVA + BLAST)
+## 5. Taxonomic assignment (SILVA + BLAST)
 
-Estrategia en dos pasos: `assignTaxonomy()` de DADA2 hasta género (bootstrap 50%), y BLAST contra la base curada de las 9 cepas para resolver especie por coincidencia exacta.
+Two-step strategy: DADA2's `assignTaxonomy()` down to genus (50% bootstrap), and BLAST against the curated database of the 9 strains to resolve species by exact match.
 
 ```r
-# 1. Asignación hasta género
+# 1. Assignment down to genus
 taxa <- assignTaxonomy(
   seqtab.nochim,
   refFasta = "refs/SkinCom_16S_dada2_taxonomy.fa",
@@ -410,22 +410,22 @@ colnames(taxa) <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus")
 setwd("C:/AA bioinfo tesis/comunidadmicrobianaepidermidis")
 library(Biostrings)
 
-# 1) ASVs a FASTA
+# 1) ASVs to FASTA
 asv_seqs <- colnames(seqtab.nochim)
 asv_ids  <- paste0("ASV", seq_along(asv_seqs))
 writeXStringSet(DNAStringSet(setNames(asv_seqs, asv_ids)), "results/asv.fa")
 
-# 2) BLAST contra la base curada (en terminal / system2)
+# 2) BLAST against the curated database (in terminal / system2)
 system2("blastn", c("-query", "results/asv.fa", "-db", "blastdb/SkinCom_16S",
                     "-outfmt", shQuote("6 qseqid sseqid pident length qcovs bitscore"),
                     "-max_target_seqs", "50", "-out", "results/asv_vs_db.tsv"))
 
-# 3) Especie = mejor hit (los empates se reportan juntos, p.ej. "capitis/epidermidis")
+# 3) Species = best hit (ties are reported together, e.g. "capitis/epidermidis")
 hits <- read.delim("results/asv_vs_db.tsv", header = FALSE,
                    col.names = c("asv", "ref", "pident", "len", "qcov", "bitscore"))
 hits$especie <- sub("_16S_[0-9]+$", "", hits$ref)
 
-id_min <- 98; qcov_min <- 90; margen_bits <- 6     # 6 bits ~ 1 diferencia
+id_min <- 98; qcov_min <- 90; margen_bits <- 6     # 6 bits ~ 1 difference
 
 asignar <- function(d) {
   top <- d[d$bitscore >= max(d$bitscore) - margen_bits, ]
@@ -441,37 +441,37 @@ tax_final <- data.frame(ASV = asv_ids, taxa, Species = res$Species,
                         identidad = res$identidad, cobertura = res$cobertura, row.names = NULL)
 write.csv(tax_final, "results/taxonomy_final.csv", row.names = FALSE)
 
-# Consolidación: combinar coincidencia exacta + mejor hit BLAST en una sola
-# columna Species, con el origen de la asignación registrado.
+# Consolidation: combine exact match + best BLAST hit into a single
+# Species column, with the origin of the assignment recorded.
 conf <- !is.na(tax_final$Species) & !is.na(tax_final$Species.1) & tax_final$Species != tax_final$Species.1
-sum(conf)  # comprobación: debería ser 0 o muy pocas
+sum(conf)  # sanity check: should be 0 or very few
 tax_final[conf, c("ASV", "Genus", "Species", "Species.1")]
 
-tax_final$Species_origen <- ifelse(!is.na(tax_final$Species), "coincidencia_exacta",
-                                   ifelse(!is.na(tax_final$Species.1), "mejor_hit_BLAST", NA_character_))
+tax_final$Species_origen <- ifelse(!is.na(tax_final$Species), "exact_match",
+                                   ifelse(!is.na(tax_final$Species.1), "best_BLAST_hit", NA_character_))
 tax_final$Species   <- ifelse(is.na(tax_final$Species), tax_final$Species.1, tax_final$Species)
 tax_final$Species.1 <- NULL
 
-# Géneros con una sola especie posible en la comunidad diseñada: inferir directamente
+# Genera with only one possible species in the designed community: infer directly
 esp_unica <- c(Corynebacterium = "afermentans",
                Micrococcus     = "luteus",
                Cutibacterium   = "acnes")
 
 falta <- is.na(tax_final$Species) & tax_final$Genus %in% names(esp_unica)
 tax_final$Species[falta] <- unname(esp_unica[tax_final$Genus[falta]])
-tax_final$Species_origen[falta] <- "inferida_por_genero"
+tax_final$Species_origen[falta] <- "inferred_from_genus"
 
 table(tax_final$Species, tax_final$Species_origen, useNA = "ifany")
 write.csv(tax_final, "results/taxonomy_final.csv", row.names = FALSE)
 ```
 
-**Resultado:** 173 ASVs → 7 de las 9 especies del diseño recuperadas en la comunidad final (*S. hominis* y *M. luteus* ausentes — esperado, sin artefactos de mezcla entre especies). Identidad y cobertura BLAST del 100% para todas las especies asignadas por coincidencia exacta. Un pequeño número de ASVs (p.ej. ASV50, ASV72, ASV156) quedó sin resolver a nivel de especie dentro de *Staphylococcus*.
+**Result:** 173 ASVs → 7 of the 9 designed species recovered in the final community (*S. hominis* and *M. luteus* absent — expected, with no cross-species mixing artifacts). BLAST identity and coverage of 100% for all species assigned by exact match. A small number of ASVs (e.g. ASV50, ASV72, ASV156) remained unresolved at species level within *Staphylococcus*.
 
 ---
 
-## 6. Árbol filogenético (opcional)
+## 6. Phylogenetic tree (optional)
 
-Paso opcional, usado solo si se necesita una distancia UniFrac o una figura de árbol; el análisis principal de diversidad beta de este trabajo usa distancia Aitchison/CLR (ver sección 10), que no requiere árbol.
+Optional step, used only if a UniFrac distance or a tree figure is needed; this work's main beta diversity analysis uses Aitchison/CLR distance (see section 10), which does not require a tree.
 
 ```r
 library(DECIPHER)
@@ -479,7 +479,7 @@ library(phangorn)
 library(Biostrings)
 
 seqs <- getSequences(seqtab.nochim)
-asv_ids <- paste0("ASV", seq_along(seqs))     # mismos IDs que en tax_final
+asv_ids <- paste0("ASV", seq_along(seqs))     # same IDs as in tax_final
 names(seqs) <- asv_ids
 
 alignment <- AlignSeqs(DNAStringSet(seqs), anchor = NA, processors = NULL)
@@ -498,7 +498,7 @@ fitGTR <- optim.pml(
   control = pml.control(trace = 0)
 )
 
-tree <- midpoint(fitGTR$tree)                 # enraizar (necesario para UniFrac)
+tree <- midpoint(fitGTR$tree)                 # root it (needed for UniFrac)
 
 saveRDS(tree, "results/tree.rds")
 ape::write.tree(tree, "results/tree.nwk")
@@ -506,10 +506,10 @@ ape::write.tree(tree, "results/tree.nwk")
 
 ---
 
-## 7. Construcción del objeto phyloseq
+## 7. Building the phyloseq object
 
 ```r
-# Exportar ASVs, tabla de conteos y taxonomía a los formatos que espera phyloseq
+# Export ASVs, count table and taxonomy to the formats phyloseq expects
 asv_seqs <- colnames(seqtab.nochim)
 asv_ids  <- paste0("ASV", seq_along(asv_seqs))
 stopifnot(identical(asv_ids, tax_final$ASV))
@@ -527,7 +527,7 @@ write.table(asv_tax, "results/ASVs_taxonomy.tsv", sep = "\t", quote = FALSE, col
 asv_tabtax <- data.frame(asv_tab, asv_tax, check.names = FALSE)
 write.table(asv_tabtax, "results/ASVs_counts_taxonomy.tsv", sep = "\t", quote = FALSE, col.names = NA)
 
-# Metadatos: de Excel a TSV
+# Metadata: from Excel to TSV
 library(readxl)
 map <- as.data.frame(read_excel("metadata/metadata.xlsx"))
 rownames(map) <- map[[1]]
@@ -546,7 +546,7 @@ tax <- as.matrix(tax_raw[, rangos])
 
 map <- read.delim("metadata/metadata.tsv", row.names = 1, check.names = FALSE)
 
-# IDs de la plataforma de secuenciación (BMK) -> nombres de condición/réplica
+# Sequencing platform (BMK) IDs -> condition/replicate names
 equiv <- c(
   "Bacteria_BMKO260810-AA254-001M0001-01" = "pHD17-1",
   "Bacteria_BMKO260810-AA254-001M0002-01" = "pHD17-2",
@@ -584,19 +584,19 @@ ps
 
 ---
 
-## 8. Filtrado de calidad y prevalencia
+## 8. Quality and prevalence filtering
 
-Se eliminan categorías técnicas o de muy baja información que no deben analizarse junto con la comunidad objetivo: muestras de muy baja profundidad y ASVs residuales de ruido de secuenciación.
+Technical or very low-information categories that shouldn't be analyzed together with the target community are removed: very low-depth samples and residual ASVs from sequencing noise.
 
 ```r
-# 0) Profundidad por muestra
+# 0) Depth per sample
 sort(sample_sums(ps))
 
-# 1) Muestras con muy poca profundidad (ninguna cae con este umbral en este dataset)
+# 1) Samples with very low depth (none falls under this threshold in this dataset)
 ps_filtered <- prune_samples(sample_sums(ps) >= 250, ps)
 nsamples(ps) - nsamples(ps_filtered)
 
-# 2) Ruido: <0.005% de las lecturas totales o presente en una sola muestra
+# 2) Noise: <0.005% of total reads or present in only one sample
 umbral <- 0.00005 * sum(sample_sums(ps_filtered))
 otu <- as(otu_table(ps_filtered), "matrix")
 if (!taxa_are_rows(ps_filtered)) otu <- t(otu)
@@ -606,40 +606,40 @@ stopifnot(identical(names(prevalencia), taxa_names(ps_filtered)))
 mantener <- taxa_sums(ps_filtered) >= umbral & prevalencia >= 2
 ps_filtered <- prune_taxa(mantener, ps_filtered)
 
-cat("Umbral:", round(umbral), "lecturas | ASVs:", ntaxa(ps), "->", ntaxa(ps_filtered), "\n")
-cat("% lecturas conservadas:", round(100 * sum(sample_sums(ps_filtered)) / sum(sample_sums(ps)), 3), "\n")
+cat("Threshold:", round(umbral), "reads | ASVs:", ntaxa(ps), "->", ntaxa(ps_filtered), "\n")
+cat("% reads retained:", round(100 * sum(sample_sums(ps_filtered)) / sum(sample_sums(ps)), 3), "\n")
 
 resumen <- function(x) {
   tt <- as.data.frame(tax_table(x))
   tapply(taxa_sums(x), paste(tt$Genus, tt$Species), sum)
 }
 a <- resumen(ps); d <- resumen(ps_filtered)
-cbind(antes = a, despues = d[names(a)])
+cbind(before = a, after = d[names(a)])
 ps_filtered
 ```
 
-`ps_filtered` es el objeto usado en todos los análisis posteriores (secciones 9–13).
+`ps_filtered` is the object used in all downstream analyses (sections 9–13).
 
 ---
 
-## 9. Diversidad alfa
+## 9. Alpha diversity
 
 ```r
 library(ggpubr)
 
 ps_nonzero <- prune_taxa(taxa_sums(ps_filtered) > 0, ps_filtered)
 sample_data(ps_nonzero)$Community <- factor(sample_data(ps_nonzero)$Community, levels = c("pHD17", "Dbap", "PF"))
-table(sample_data(ps_nonzero)$Community)      # debe salir 4, 4, 4
+table(sample_data(ps_nonzero)$Community)      # should come out 4, 4, 4
 
 alfa <- estimate_richness(ps_nonzero, measures = c("Observed", "Shannon", "Simpson"))
-rownames(alfa) <- sample_names(ps_nonzero)       # estimate_richness cambia los guiones por puntos
+rownames(alfa) <- sample_names(ps_nonzero)       # estimate_richness turns hyphens into dots
 alfa$Pielou <- alfa$Shannon / log(alfa$Observed)
 
 df <- cbind(as(sample_data(ps_nonzero), "data.frame"), alfa)
 df
 
-# Con solo 4 réplicas por grupo, el test tiene poca potencia y solo detecta
-# diferencias muy grandes -- ausencia de significancia no equivale a igualdad.
+# With only 4 replicates per group, the test has low power and only detects
+# very large differences -- absence of significance does not mean equality.
 pares <- combn(levels(df$Community), 2, simplify = FALSE)
 grafico <- function(indice) {
   ggboxplot(df, x = "Community", y = indice, fill = "Community", add = "jitter") +
@@ -655,7 +655,7 @@ pairwise.wilcox.test(df$Shannon, df$Community, p.adjust.method = "holm")
 ```
 
 ```r
-# Half-violin plots (estilo alternativo)
+# Half-violin plots (alternative style)
 library(see)
 library(gghalves)
 library(ggplot2)
@@ -683,13 +683,13 @@ ggsave("stats/alpha_shannon.pdf",  p_shannon,  width = 6, height = 6)
 ggsave("stats/alpha_richness.pdf", p_richness, width = 6, height = 6)
 ```
 
-**Resultado:** sin diferencias significativas entre pHD17/Dbap/PF (Kruskal-Wallis, Shannon p=0.87) — la diversidad global de la comunidad se mantiene estable; el efecto de *bap* (ver sección 13) es específico de especie, no un cambio general en diversidad.
+**Result:** no significant differences between pHD17/Dbap/PF (Kruskal-Wallis, Shannon p=0.87) — overall community diversity remains stable; the *bap* effect (see section 13) is species-specific, not a general shift in diversity.
 
 ---
 
-## 10. Diversidad beta (Aitchison/CLR)
+## 10. Beta diversity (Aitchison/CLR)
 
-Distancia Aitchison/CLR en vez de Bray-Curtis/UniFrac: más apropiada para datos composicionales de 16S (Gloor et al. 2017), y no requiere árbol filogenético.
+Aitchison/CLR distance instead of Bray-Curtis/UniFrac: more appropriate for 16S compositional data (Gloor et al. 2017), and does not require a phylogenetic tree.
 
 ```r
 library(vegan)
@@ -700,14 +700,14 @@ if (taxa_are_rows(ps_filtered)) X <- t(X)
 dim(X)
 sum(X == 0)
 
-d.czm <- cmultRepl(X, method = "CZM", label = 0)   # reemplazo de ceros
-E.clr <- t(apply(d.czm, 1, function(x) log(x) - mean(log(x))))   # CLR por muestra
+d.czm <- cmultRepl(X, method = "CZM", label = 0)   # zero replacement
+E.clr <- t(apply(d.czm, 1, function(x) log(x) - mean(log(x))))   # CLR per sample
 
 d.pcx    <- prcomp(E.clr)
-dist.clr <- dist(E.clr)                            # distancia de Aitchison
+dist.clr <- dist(E.clr)                            # Aitchison distance
 summary(d.pcx)$importance[, 1:4]
 
-# PCA sobre CLR (con pseudocuenta 1, dentro de phyloseq)
+# PCA on CLR (with pseudocount 1, within phyloseq)
 group_palette <- c(pHD17 = "midnightblue", Dbap = "gold", PF = "orange")
 
 ps_clr <- transform_sample_counts(ps_filtered, function(x) { x <- x + 1; log(x) - mean(log(x)) })
@@ -722,7 +722,7 @@ pca_plot <- plot_ordination(ps_clr, ord, color = "Community") +
 print(pca_plot)
 ggsave("results/beta_pca_aitchison.pdf", pca_plot, width = 6, height = 6)
 
-# PERMANOVA sobre las mismas distancias CLR (Aitchison)
+# PERMANOVA on the same CLR (Aitchison) distances
 X <- as(otu_table(ps_clr), "matrix")
 if (taxa_are_rows(ps_clr)) X <- t(X)
 clr_dist <- dist(X, method = "euclidean")
@@ -735,10 +735,10 @@ set.seed(123)
 adonis_res <- adonis2(clr_dist ~ Community, data = meta_df, permutations = 999)
 print(adonis_res)
 
-# Homogeneidad de dispersión entre grupos (supuesto de PERMANOVA)
+# Dispersion homogeneity across groups (PERMANOVA assumption)
 anova(betadisper(clr_dist, meta_df$Community))
 
-# ANOSIM: confirmación no paramétrica basada en rangos de distancia
+# ANOSIM: non-parametric confirmation based on distance ranks
 set.seed(123)
 ano.group <- anosim(clr_dist, meta_df$Community, permutations = 999)
 ano.group
@@ -748,11 +748,11 @@ plot(ano.group)
 dev.off()
 ```
 
-**Resultado:** R = 0.007, P = 0.398 (ANOSIM) — las tres comunidades no se separan en el espacio de ordenación. Con n=4/grupo la potencia para separar centroides es limitada; coherente con el resto del análisis (el efecto de *bap* es específico de una especie, no un desplazamiento composicional global).
+**Result:** R = 0.007, P = 0.398 (ANOSIM) — the three communities do not separate in ordination space. With n=4/group, power to separate centroids is limited; consistent with the rest of the analysis (the *bap* effect is species-specific, not a global compositional shift).
 
 ---
 
-## 11. Curvas de rarefacción
+## 11. Rarefaction curves
 
 ```r
 library(vegan)
@@ -779,7 +779,7 @@ p <- ggplot(curvas, aes(lecturas, shannon, group = muestra, color = Community)) 
   geom_line(linewidth = 0.7) +
   scale_x_continuous(labels = scales::comma) +
   scale_color_manual(values = group_palette) +
-  theme_classic() + xlab("Lecturas") + ylab("Shannon")
+  theme_classic() + xlab("Reads") + ylab("Shannon")
 
 print(p)
 ggsave("stats/shannon_rarefaction.pdf", p, width = 7, height = 5)
@@ -787,9 +787,9 @@ ggsave("stats/shannon_rarefaction.pdf", p, width = 7, height = 5)
 
 ---
 
-## 12. Composición: barras, bubble plot, heatmap, Venn, UpSet
+## 12. Composition: bar plots, bubble plot, heatmap, Venn, UpSet
 
-### 12.1 Barras de abundancia relativa (por muestra y por comunidad)
+### 12.1 Relative abundance bar plots (by sample and by community)
 
 ```r
 library(dplyr)
@@ -801,7 +801,7 @@ ps_rel <- ps_filtered %>%
   tax_glom(taxrank = nivel, NArm = FALSE) %>%
   transform_sample_counts(function(x) x / sum(x))
 
-# Por muestra
+# By sample
 Sample_tax <- psmelt(ps_rel) %>% arrange(.data[[nivel]])
 Sample_tax$Sample <- factor(Sample_tax$Sample, levels = sample_names(ps_filtered))
 
@@ -814,7 +814,7 @@ p1 <- ggplot(Sample_tax, aes(x = Sample, y = Abundance, fill = .data[[nivel]])) 
   ylab("Relative abundance") + ggtitle(paste(nivel, "composition by sample"))
 ggsave("stats/barras_muestra.pdf", p1, width = 10, height = 5)
 
-# Por comunidad (media de las réplicas)
+# By community (average of replicates)
 type_tax <- Sample_tax %>%
   group_by(Community, .data[[nivel]]) %>%
   summarise(Abundance = mean(Abundance), .groups = "drop")
@@ -827,12 +827,12 @@ p2 <- ggplot(type_tax, aes(x = Community, y = Abundance, fill = .data[[nivel]]))
   ggtitle(paste(nivel, "composition by community (mean of replicates)"))
 ggsave("stats/barras_comunidad.pdf", p2, width = 6, height = 5)
 
-# Tabla de porcentajes (las barras no dejan ver bien las especies minoritarias)
+# Percentage table (the bars don't show minor species well)
 tt <- as.data.frame(type_tax); tt$taxon <- tt[[nivel]]
 round(100 * xtabs(Abundance ~ taxon + Community, data = tt), 2)
 ```
 
-### 12.2 Bubble plot (media ± SD por especie y comunidad)
+### 12.2 Bubble plot (mean ± SD by species and community)
 
 ```r
 # ================================================================
@@ -847,9 +847,9 @@ library(ggplot2)
 
 nivel <- "Species"
 
-# --- 1) SD entre réplicas, por especie y comunidad --------------
-# Calculado ANTES de fusionar muestras: cada réplica se normaliza a
-# % por su cuenta, y luego se calcula la SD dentro de cada Community.
+# --- 1) SD across replicates, by species and community ----------
+# Calculated BEFORE merging samples: each replicate is normalized to
+# % on its own, and then SD is calculated within each Community.
 sd1 <- ps_filtered %>%
   tax_glom(taxrank = nivel, NArm = FALSE) %>%
   transform_sample_counts(function(x) x / sum(x) * 100) %>%
@@ -857,37 +857,37 @@ sd1 <- ps_filtered %>%
   group_by(OTU, Community) %>%
   summarize(SD = sd(Abundance, na.rm = TRUE), .groups = "drop")
 
-# --- 2) Media por comunidad --------------------------------------
+# --- 2) Mean by community --------------------------------------
 bub1 <- merge_samples(ps_filtered, "Community")
 
 type_taxa1 <- bub1 %>%
   tax_glom(taxrank = nivel, NArm = FALSE) %>%
   transform_sample_counts(function(x) x / sum(x) * 100) %>%
   psmelt() %>%
-  mutate(Community = as.character(Sample)) %>%   # merge_samples desordena metadatos; reconstruir Community
+  mutate(Community = as.character(Sample)) %>%   # merge_samples scrambles metadata; rebuild Community
   arrange(OTU)
 
 dat1 <- type_taxa1 %>%
   left_join(sd1, by = c("OTU", "Community")) %>%
   as.data.table()
 
-# --- 3) Especies raras NO se colapsan -----------------------------
-# A diferencia de una comunidad ambiental ruidosa con cientos de taxones,
-# esta es una comunidad sintética DEFINIDA de 9 especies: si una especie
-# cae mucho en una condición (p.ej. el fondo Dbap), eso es justo lo que
-# se quiere ver, no ocultar. Solo se colapsa el ~0.01% de lecturas sin
-# asignación de especie.
+# --- 3) Rare species are NOT collapsed -----------------------------
+# Unlike a noisy environmental community with hundreds of taxa,
+# this is a DEFINED synthetic community of 9 species: if a species
+# drops sharply in one condition (e.g. the Dbap background), that's
+# exactly what should be shown, not hidden. Only the ~0.01% of reads
+# with no species assignment is collapsed.
 dat1[, Species_plot := as.character(get(nivel))]
 dat1[is.na(Species_plot) | Species_plot == "NA", Species_plot := "Unassigned (background noise, ~0.01%)"]
 
-# Orden del eje Y Y de la leyenda: por abundancia media descendente.
-# Asignar los MISMOS niveles de factor antes de graficar mantiene el
-# orden de color de la leyenda sincronizado con las burbujas del eje Y.
+# Order of the Y axis and legend: by descending mean abundance.
+# Assigning the SAME factor levels before plotting keeps the legend's
+# color order in sync with the Y-axis bubbles.
 orden_especies <- dat1[, .(m = mean(Abundance, na.rm = TRUE)), by = Species_plot][order(-m), Species_plot]
 dat1[, Species_plot := factor(Species_plot, levels = orden_especies)]
 sample_order <- c("pHD17", "Dbap", "PF")
 
-# --- 4) Gráfico -----------------------------------------------------
+# --- 4) Plot -----------------------------------------------------
 Fig_bubble <- ggplot(
   dat1[Abundance > 0],
   aes(x = factor(Community, levels = sample_order), y = Species_plot)
@@ -927,9 +927,9 @@ n_species <- length(unique(tax_table(ps_filtered)[, "Species"]))
 xx <- amp_heatmap(
   ampvis2_obj,
   group_by = "Community",
-  tax_aggregate = "Species",   # agrega a especie, no OTU
-  tax_add = "Genus",           # añade el género junto al nombre de especie en el eje Y
-  tax_show = n_species,        # muestra todas las especies definidas, ninguna oculta
+  tax_aggregate = "Species",   # aggregates to species, not OTU
+  tax_add = "Genus",           # adds the genus next to the species name on the Y axis
+  tax_show = n_species,        # shows all defined species, none hidden
   color_vector = c("snow", "steelblue"),
   plot_values = TRUE
 ) + theme_classic() +
@@ -940,7 +940,7 @@ print(xx)
 ggplot2::ggsave("results/heatmap_especies.pdf", xx, width = 5, height = 6)
 ```
 
-### 12.4 Diagrama de Venn (ampvis2)
+### 12.4 Venn diagram (ampvis2)
 
 ```r
 # ================================================================
@@ -949,23 +949,23 @@ ggplot2::ggsave("results/heatmap_especies.pdf", xx, width = 5, height = 6)
 library(ampvis2)
 library(phyloseq)
 
-# amp_venn no tiene parámetro de agregación como amp_heatmap's tax_aggregate,
-# así que se agrega a especie primero (tax_glom), igual que en bubble/heatmap.
+# amp_venn has no aggregation parameter like amp_heatmap's tax_aggregate,
+# so it's aggregated to species first (tax_glom), same as in bubble/heatmap.
 ps_species <- tax_glom(ps_filtered, taxrank = "Species", NArm = FALSE)
 ampvis2_species <- amp_load(ps_species)
 
 venn <- amp_venn(
   ampvis2_species,
   group = "Community",
-  cut_a = 0.01,   # abundancia relativa media mínima (%) para contar una especie como "presente"
-  cut_f = 75,     # % mínimo de réplicas del grupo donde debe aparecer (75% = 3 de 4)
+  cut_a = 0.01,   # minimum mean relative abundance (%) to count a species as "present"
+  cut_f = 75,     # minimum % of the group's replicates in which it must appear (75% = 3 of 4)
   detailed_output = TRUE
 )
 
 venn$plot
 ```
 
-**Resultado:** las 6 especies con abundancia >0.01% son compartidas por las 3 condiciones (core del 100%) — ninguna especie exclusiva de una sola condición.
+**Result:** the 6 species with abundance >0.01% are shared by all 3 conditions (100% core) — no species exclusive to a single condition.
 
 ### 12.5 UpSet plot
 
@@ -1007,17 +1007,17 @@ upset(fromList(species_list),
       mb.ratio = c(0.6, 0.4))
 ```
 
-Con solo 3 grupos y un core del 100% (ver Venn), el UpSet plot no aporta información adicional respecto al Venn diagram — se incluye aquí por completitud pero se descartó de la presentación final de resultados.
+With only 3 groups and a 100% core (see Venn), the UpSet plot adds no information beyond the Venn diagram — it's included here for completeness but was dropped from the final results presentation.
 
 ---
 
-## 13. Abundancia diferencial: LEfSe, ANOVA, ANCOM, ANCOM-BC2
+## 13. Differential abundance: LEfSe, ANOVA, ANCOM, ANCOM-BC2
 
-Cuatro métodos independientes, con lógicas estadísticas distintas, para evaluar si el gen *bap* funcional confiere una ventaja a alguna especie de la comunidad. Los cuatro se ejecutan sobre `ps_filtered` agregado a nivel de especie (`tax_glom`).
+Four independent methods, with different statistical logic, to assess whether the functional *bap* gene confers an advantage to any species in the community. All four are run on `ps_filtered` aggregated to species level (`tax_glom`).
 
 ### 13.1 LEfSe
 
-> **Nota de reproducibilidad:** `run_lefse()` de `microbiomeMarker` (v1.13.2, Bioconductor devel) tiene un bug real confirmado en su propio código fuente — ver [sección 14](#14-problemas-conocidos-de-los-paquetes-y-soluciones-aplicadas). El código de abajo usa una copia parcheada, `run_lefse_fixed()`.
+> **Reproducibility note:** `microbiomeMarker`'s `run_lefse()` (v1.13.2, Bioconductor devel) has a real, confirmed bug in its own source code — see [section 14](#14-known-package-issues-and-applied-fixes). The code below uses a patched copy, `run_lefse_fixed()`.
 
 ```r
 # ================================================================
@@ -1026,7 +1026,7 @@ Cuatro métodos independientes, con lógicas estadísticas distintas, para evalu
 library(microbiomeMarker)
 library(phyloseq)
 
-# PATCH: ver sección 14 para la explicación completa del bug y el fix.
+# PATCH: see section 14 for the full explanation of the bug and the fix.
 run_lefse_fixed <- function(ps, group, subgroup = NULL, taxa_rank = "all",
                              transform = c("identity", "log10", "log10p"),
                              norm = "CPM", norm_para = list(), kw_cutoff = 0.05,
@@ -1070,7 +1070,7 @@ run_lefse_fixed <- function(ps, group, subgroup = NULL, taxa_rank = "all",
         kw_p <- kw_p[!na_ind]
     }
     sig_ind <- kw_p <= kw_cutoff
-    sig_otus <- otus_test[, sig_ind, drop = FALSE]   # <-- EL FIX (era: otus_test[, sig_ind])
+    sig_otus <- otus_test[, sig_ind, drop = FALSE]   # <-- THE FIX (was: otus_test[, sig_ind])
     features_nms <- names(sig_otus)
     wilcoxon_p <- purrr::map2_lgl(sig_otus, features_nms, ~test_rep_wilcoxon(subgrps,
         grp_hie, .x, .y, wilcoxon_cutoff = wilcoxon_cutoff, multicls_strat = multigrp_strat,
@@ -1128,11 +1128,11 @@ print(p_lefse)
 ggsave("results/lefse_markers.pdf", p_lefse, width = 15, height = max(2.5, 0.7 * n_markers + 1.3))
 ```
 
-**Resultado:** 1 marcador — *S. epidermidis*, enriquecida en pHD17 (Kruskal-Wallis p≤0.05, LDA≥2).
+**Result:** 1 marker — *S. epidermidis*, enriched in pHD17 (Kruskal-Wallis p≤0.05, LDA≥2).
 
-### 13.2 ANOVA (paramétrico sobre CLR)
+### 13.2 ANOVA (parametric, on CLR)
 
-> **Nota de reproducibilidad:** `run_test_multiple_groups()` de `microbiomeMarker` se descartó aquí — su parámetro `transform` no acepta `"clr"`, y enruta a través del mismo `preprocess_ps()` interno que rompe con datos ya CLR-transformados (ver sección 14). En su lugar: ANOVA de una vía por especie, directo y transparente con `stats::aov()`.
+> **Reproducibility note:** `microbiomeMarker`'s `run_test_multiple_groups()` was dropped here — its `transform` parameter doesn't accept `"clr"`, and it routes through the same internal `preprocess_ps()` that breaks with already CLR-transformed data (see section 14). Used instead: a straightforward, transparent per-species one-way ANOVA with `stats::aov()`.
 
 ```r
 library(phyloseq)
@@ -1170,17 +1170,17 @@ markers
 write.csv(markers, "results/markers_anova.csv", row.names = FALSE)
 ```
 
-**Resultado:** ninguna especie sobrevive corrección FDR (q<0.05); *S. epidermidis* es la más cercana (F=5.85, p=0.024, q=0.165).
+**Result:** no species survives FDR correction (q<0.05); *S. epidermidis* comes closest (F=5.85, p=0.024, q=0.165).
 
 ### 13.3 ANCOM
 
 ```r
 # ================================================================
 # ANCOM (original, Mandal et al. 2015)
-# run_ancom() hace su PROPIO manejo composicional interno (confirmado
-# vía args(run_ancom): transform solo acepta identity/log10/log10p,
-# sin "clr", y tiene su propio norm="TSS" por defecto) -- se le pasa
-# ps_species crudo, no el objeto CLR-transformado.
+# run_ancom() does its OWN internal compositional handling (confirmed
+# via args(run_ancom): transform only accepts identity/log10/log10p,
+# no "clr", and has its own norm="TSS" by default) -- it's given
+# raw ps_species, not the CLR-transformed object.
 # ================================================================
 library(microbiomeMarker)
 library(phyloseq)
@@ -1198,21 +1198,21 @@ mm_ancom <- run_ancom(
 
 ancom <- marker_table(mm_ancom)
 ancom
-ancom_df <- as(ancom, "data.frame")   # necesario: write.csv() directo sobre el objeto S4 falla (ver sección 14)
+ancom_df <- as(ancom, "data.frame")   # needed: write.csv() directly on the S4 object fails (see section 14)
 write.csv(ancom_df, "results/markers_ANCOM.csv", row.names = FALSE)
 ```
 
-**Resultado:** ningún marcador identificado al umbral estándar (W_cutoff=0.75). Con solo 7 especies, ANCOM exige que una especie sea significativa frente al 75% de las demás en comparación por pares — un listón muy alto para tan pocos taxones. Coherente con el ANOVA-FDR.
+**Result:** no marker identified at the standard threshold (W_cutoff=0.75). With only 7 species, ANCOM requires a species to be significant against 75% of the others in pairwise comparison — a very high bar for so few taxa. Consistent with the ANOVA-FDR result.
 
-### 13.4 ANCOM-BC2 (modelo combinado, 3 grupos)
+### 13.4 ANCOM-BC2 (combined model, 3 groups)
 
 ```r
 # ================================================================
 # ANCOM-BC2 across the three communities
-# Sin covariable real disponible en metadata.tsv (solo Community, un
-# id, y DNA ng/uL -- valor técnico de extracción, no incluido).
-# Referencia = Dbap: mismo plásmido que pHD17, bap mutado -- aísla el
-# efecto de bap (pHD17 vs Dbap) del efecto de carga del plásmido
+# No real covariate available in metadata.tsv (only Community, an
+# id, and DNA ng/uL -- a technical extraction value, not included).
+# Reference = Dbap: same plasmid as pHD17, mutated bap -- isolates
+# the bap effect (pHD17 vs Dbap) from the plasmid-burden effect
 # (PF vs Dbap).
 # ================================================================
 library(ANCOMBC)
@@ -1232,7 +1232,7 @@ output_combined <- ancombc2(
   p_adj_method = "fdr",
   pseudo = 0,
   pseudo_sens = TRUE,
-  prv_cut = 0.01,       # laxo a propósito: solo 7-9 especies diseñadas, no filtrar ninguna por accidente
+  prv_cut = 0.01,       # deliberately lax: only 7-9 designed species, don't accidentally filter any out
   lib_cut = 0,
   s0_perc = 0.05,
   group = "Community",
@@ -1244,7 +1244,7 @@ output_combined <- ancombc2(
   global = TRUE,
   pairwise = TRUE,
   dunnet = TRUE,
-  trend = FALSE   # sin orden natural entre pHD17/Dbap/PF; trend=TRUE exige matrices de contraste que no hacen falta
+  trend = FALSE   # no natural order between pHD17/Dbap/PF; trend=TRUE requires contrast matrices that aren't needed
 )
 
 res <- output_combined$res
@@ -1252,30 +1252,30 @@ res
 write.csv(res, "results/markers_ANCOMBC2.csv", row.names = FALSE)
 ```
 
-> **Nota de reproducibilidad importante:** con `pairwise=TRUE` + `dunnet=TRUE` a la vez, `output_combined$res_pair` tiene las columnas `p_`/`q_` rotas (ver sección 14) — para las comparaciones por pares, usar la versión de la sección 13.5 en su lugar. `res` (sin pairwise) sí es de fiar para los dos contrastes de referencia (pHD17 vs Dbap, PF vs Dbap).
+> **Important reproducibility note:** with `pairwise=TRUE` + `dunnet=TRUE` together, `output_combined$res_pair` has broken `p_`/`q_` columns (see section 14) — for pairwise comparisons, use the version in section 13.5 instead. `res` (without pairwise) IS reliable for the two reference contrasts (pHD17 vs Dbap, PF vs Dbap).
 
-### 13.5 ANCOM-BC2 (3 comparaciones por pares, limpias)
+### 13.5 ANCOM-BC2 (3 clean pairwise comparisons)
 
 ```r
 # ================================================================
-# ANCOM-BC2, como 3 comparaciones de dos grupos independientes en vez
-# de la ejecución combinada pairwise+dunnet de la sección 13.4.
+# ANCOM-BC2, as 3 independent two-group comparisons instead of the
+# combined pairwise+dunnet run in section 13.4.
 #
-# Por qué: con global/pairwise/dunnet=TRUE a la vez, las columnas p/q
-# de res_pair salen rotas (p=1 para todo, incluso un caso con W=3.4
-# que debería dar p=0.009 -- bug real confirmado, no nuestro). Sub-
-# setear a dos grupos y correr ancombc2 simple (pairwise=FALSE etc.)
-# es la solución estándar para factores multinivel y evita por
-# completo ese camino de código roto.
+# Why: with global/pairwise/dunnet=TRUE all together, res_pair's p/q
+# columns come out broken (p=1 for everything, even a case with
+# W=3.4 that should give p=0.009 -- a real, confirmed bug, not ours).
+# Subsetting to two groups and running plain ancombc2 (pairwise=FALSE
+# etc.) is the standard workaround for multi-level factors and
+# completely avoids that broken code path.
 # ================================================================
 library(ANCOMBC)
 library(phyloseq)
 library(dplyr)
 
 run_pair <- function(ps, level_ref, level_other, contrast_label) {
-  # prune_samples(), no subset_samples(): subset_samples() usa NSE
-  # internamente y no encuentra level_ref/level_other cuando se llama
-  # dentro de una función (limitación real de phyloseq, no nuestro bug)
+  # prune_samples(), not subset_samples(): subset_samples() uses NSE
+  # internally and can't find level_ref/level_other when called
+  # from inside a function (a real phyloseq limitation, not our bug)
   keep <- sample_data(ps)$Community %in% c(level_ref, level_other)
   ps_pair <- prune_samples(keep, ps)
   sample_data(ps_pair)$Community <- droplevels(factor(
@@ -1337,14 +1337,14 @@ print(df_res)
 write.csv(df_res, "results/markers_ANCOMBC2_pairwise.csv", row.names = FALSE)
 ```
 
-**Resultado:** pHD17 vs Dbap: lfc=1.24, q=0.095 (la más cercana a significancia, *S. epidermidis*). PF vs Dbap y pHD17 vs PF: sin marcadores significativos ni sugestivos.
+**Result:** pHD17 vs Dbap: lfc=1.24, q=0.095 (the closest to significance, *S. epidermidis*). PF vs Dbap and pHD17 vs PF: no significant or suggestive markers.
 
-### 13.6 Visualización de ANCOM-BC2 (bar plot + volcano, 3 contrastes)
+### 13.6 ANCOM-BC2 visualization (bar plot + volcano, 3 contrasts)
 
 ```r
 # ================================================================
 # ANCOM-BC2 visualizations: all 3 pairwise contrasts
-# Requiere haber corrido la sección 13.5 antes -- usa su `df_res`.
+# Requires section 13.5 to have been run first -- uses its `df_res`.
 # ================================================================
 library(dplyr)
 library(ggplot2)
@@ -1355,7 +1355,7 @@ orden_taxa <- df_res %>%
   dplyr::pull(taxon)
 df_res$taxon <- factor(df_res$taxon, levels = orden_taxa)
 
-# ---- 1. Bar plot de log fold change, 3 contrastes ----
+# ---- 1. Log fold change bar plot, 3 contrasts ----
 p_bar <- ggplot(df_res, aes(x = taxon, y = lfc, fill = lfc)) +
   geom_col(width = 0.7, color = "black") +
   geom_errorbar(aes(ymin = lfc - se, ymax = lfc + se), width = 0.2) +
@@ -1378,7 +1378,7 @@ p_bar <- ggplot(df_res, aes(x = taxon, y = lfc, fill = lfc)) +
 print(p_bar)
 ggsave("results/ancombc2_lfc_barplot.pdf", p_bar, width = 11, height = 4.5)
 
-# ---- 2. Volcano plot, 3 contrastes ----
+# ---- 2. Volcano plot, 3 contrasts ----
 p_volcano <- ggplot(df_res, aes(x = lfc, y = -log10(q))) +
   geom_point(aes(color = sig), size = 3) +
   geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "red") +
@@ -1405,84 +1405,84 @@ print(p_volcano)
 ggsave("results/ancombc2_volcano.pdf", p_volcano, width = 11, height = 4.5)
 ```
 
-### 13.7 Síntesis de los 4 métodos
+### 13.7 Summary of the 4 methods
 
-| Método | ¿Corrección múltiple? | Resultado para *S. epidermidis* |
+| Method | Multiple-testing correction? | Result for *S. epidermidis* |
 |---|---|---|
-| LEfSe | No (KW + Wilcoxon + LDA) | Único marcador, enriquecida en pHD17 |
-| ANOVA (CLR) | Sí (FDR) | p=0.024, q=0.165 — más cercana, no significativa |
-| ANCOM | Implícita (W_cutoff) | Ningún marcador al umbral estándar |
-| ANCOM-BC2 (pares) | Sí (FDR) | pHD17 vs Dbap: q=0.095 — la más cercana |
+| LEfSe | No (KW + Wilcoxon + LDA) | Only marker, enriched in pHD17 |
+| ANOVA (CLR) | Yes (FDR) | p=0.024, q=0.165 — closest, not significant |
+| ANCOM | Implicit (W_cutoff) | No marker at the standard threshold |
+| ANCOM-BC2 (pairwise) | Yes (FDR) | pHD17 vs Dbap: q=0.095 — closest |
 
-Validado además de forma independiente contra el informe comercial de secuenciación (Metastats/BMK): p crudo <0.05 en las 3 comparaciones por pares para *S. epidermidis*, pero q>0.05 en las 3 — mismo patrón exacto, confirmando que ninguno de los dos análisis se contradice, solo difieren en si destacan el p crudo o el q corregido como criterio de "significativo".
+Additionally validated independently against the commercial sequencing report (Metastats/BMK): raw p<0.05 in all 3 pairwise comparisons for *S. epidermidis*, but q>0.05 in all 3 — the exact same pattern, confirming neither analysis contradicts the other, they simply differ in whether raw p or corrected q is highlighted as the "significant" criterion.
 
-**Conclusión:** ningún método alcanza significancia formal tras corrección por comparaciones múltiples (n=4/grupo limita la potencia), pero la convergencia direccional entre métodos con lógicas estadísticas distintas señala consistentemente a *S. epidermidis* como la especie más afectada por la funcionalidad de *bap*.
-
----
-
-## 14. Problemas conocidos de los paquetes y soluciones aplicadas
-
-Documentado aquí porque son bugs reales de las versiones instaladas (no errores de uso), reproducibles y relevantes para cualquiera que reutilice este código con las mismas versiones de paquete.
-
-### 14.1 `microbiomeMarker::run_lefse()` — vector desnudo al seleccionar una sola columna
-
-**Paquete/versión:** `microbiomeMarker` 1.13.2 (Bioconductor devel).
-
-**Síntoma:** `Error: Can't recycle .x (size N) to match .y (size 0)` dentro de `purrr::map2_lgl()`, de forma intermitente según cuántos taxones pasan el filtro de Kruskal-Wallis.
-
-**Causa raíz:** en el código fuente de `run_lefse()`, la línea `sig_otus <- otus_test[, sig_ind]` usa el subsetting por defecto de `data.frame` de R (`drop = TRUE`), que convierte el resultado a un vector plano cuando exactamente **una** columna pasa el filtro — rompiendo la siguiente llamada a `purrr::map2_lgl()`, que espera una lista/data.frame.
-
-**Solución:** copia exacta de la función con `drop = FALSE` añadido en esa línea (`run_lefse_fixed()`, sección 13.1), con `environment()` reasignado al namespace del paquete para que siga viendo sus funciones internas no exportadas (`preprocess_ps`, `test_rep_wilcoxon`, etc.).
-
-### 14.2 `preprocess_ps()` interno — malinterpreta datos ya CLR-transformados
-
-**Síntoma:** `The library size of sample(s): X is/are zero` al pasar un objeto ya transformado a CLR (valores negativos) a `run_lefse()` o `run_test_multiple_groups()`.
-
-**Causa raíz:** el helper interno `preprocess_ps()`, compartido por varias funciones `run_*` del paquete, calcula el "tamaño de librería" como la suma de valores por muestra — una operación que asume conteos crudos no negativos. Con datos CLR (media ~0 por muestra, mitad de los valores negativos), esa suma da un número cercano a cero, y la función lo interpreta como profundidad de secuenciación nula.
-
-**Solución:** nunca pre-transformar a CLR antes de pasar los datos a estas funciones — dejar que su propio parámetro `norm`/`transform` haga la normalización internamente (`run_lefse(norm="CPM")`, `run_ancom(norm="TSS")`). Para el ANOVA, evitar la función del paquete por completo y usar `stats::aov()` directo sobre la matriz CLR (sección 13.2).
-
-### 14.3 `ancombc2()` — `p`/`q` degenerados en `res_pair` con `pairwise` + `dunnet` combinados
-
-**Paquete/versión:** `ANCOMBC` (release de Bioconductor, no devel — a diferencia de los dos anteriores).
-
-**Síntoma:** con `pairwise=TRUE` y `dunnet=TRUE` simultáneamente, todas las columnas `p_`/`q_` de `output_combined$res_pair` salen exactamente en `1`, sin importar el valor real del estadístico `W`.
-
-**Causa raíz confirmada:** comparando fila a fila `res` (modelo simple, sin pairwise) contra `res_pair` para el mismo coeficiente nominal, `lfc`, `se` y `W` son **idénticos** entre ambos objetos (p.ej. W=3.397898 en los dos), pero `p` pasa de 0.0094 (correcto) a 1 (imposible para ese W). El modelo subyacente es el mismo; algo en el cálculo conjunto de p-valores de la rama `pairwise+dunnet` con n pequeño (n=4/grupo aquí) devuelve un valor degenerado.
-
-**Solución:** no usar `res_pair` de una ejecución combinada. En su lugar, para cada par de grupos, ejecutar `ancombc2()` de forma independiente y simple (`pairwise=FALSE`, `dunnet=FALSE`, `global=FALSE`) sobre un subset de solo esos dos grupos (`prune_samples()`, sección 13.5) — exactamente tan fiable como la ejecución de referencia que sí funcionó bien.
-
-### 14.4 `phyloseq::subset_samples()` — evaluación no estándar rota dentro de una función
-
-**Síntoma:** `error al evaluar el argumento 'table' ... objeto 'level_ref' no encontrado`, al llamar `subset_samples(ps, Community %in% c(level_ref, level_other))` dentro de una función definida por el usuario.
-
-**Causa raíz:** `subset_samples()` usa evaluación no estándar (NSE) internamente y no resuelve correctamente variables definidas en el entorno de la función que la llama — una limitación conocida de phyloseq, no específica de este análisis.
-
-**Solución:** usar `prune_samples()` con un vector lógico calculado explícitamente (`sample_data(ps)$Community %in% c(...)`) en vez de `subset_samples()`, siempre que el subsetting ocurra dentro de una función.
-
-### 14.5 `write.csv()` sobre un objeto S4 `marker_table` con filas
-
-**Síntoma:** `Error en validObject(.Object): invalid class "marker_table" object: marker table must have non-zero dimensions`, al llamar `write.csv()` directamente sobre el resultado de `marker_table()` cuando SÍ hay marcadores (con cero marcadores, `marker_table()` devuelve `NULL` y no hay error, distinto comportamiento).
-
-**Causa raíz:** `marker_table` es una clase S4; `write.csv()` intenta coaccionarla internamente a `data.frame`, y esa ruta de coerción vuelve a disparar la validación de la clase S4 `marker_table`, que falla en ese punto del pipeline de `write.table()`.
-
-**Solución:** convertir explícitamente con `as(x, "data.frame")` antes de `write.csv()` (sección 13.3) — evita por completo la ruta de coerción interna problemática.
+**Conclusion:** no method reaches formal significance after correction for multiple comparisons (n=4/group limits power), but the directional convergence across methods with different statistical logic consistently points to *S. epidermidis* as the species most affected by *bap* functionality.
 
 ---
 
-## 15. Reproducibilidad
+## 14. Known package issues and applied fixes
 
-Pendiente de incluir en la versión final publicada junto con el manuscrito:
+Documented here because these are real bugs in the installed versions (not usage errors), reproducible, and relevant to anyone reusing this code with the same package versions.
+
+### 14.1 `microbiomeMarker::run_lefse()` — bare vector when selecting a single column
+
+**Package/version:** `microbiomeMarker` 1.13.2 (Bioconductor devel).
+
+**Symptom:** `Error: Can't recycle .x (size N) to match .y (size 0)` inside `purrr::map2_lgl()`, intermittently depending on how many taxa pass the Kruskal-Wallis filter.
+
+**Root cause:** in `run_lefse()`'s source code, the line `sig_otus <- otus_test[, sig_ind]` uses R's default `data.frame` subsetting (`drop = TRUE`), which converts the result to a flat vector when exactly **one** column passes the filter — breaking the following call to `purrr::map2_lgl()`, which expects a list/data.frame.
+
+**Fix:** an exact copy of the function with `drop = FALSE` added on that line (`run_lefse_fixed()`, section 13.1), with `environment()` reassigned to the package's namespace so it can still see its non-exported internal functions (`preprocess_ps`, `test_rep_wilcoxon`, etc.).
+
+### 14.2 Internal `preprocess_ps()` — misreads already CLR-transformed data
+
+**Symptom:** `The library size of sample(s): X is/are zero` when passing an object already CLR-transformed (negative values) to `run_lefse()` or `run_test_multiple_groups()`.
+
+**Root cause:** the internal helper `preprocess_ps()`, shared by several of the package's `run_*` functions, computes "library size" as the sum of values per sample — an operation that assumes non-negative raw counts. With CLR data (mean ~0 per sample, half the values negative), that sum comes out near zero, and the function interprets it as zero sequencing depth.
+
+**Fix:** never pre-transform to CLR before passing data to these functions — let their own `norm`/`transform` parameter do the normalization internally (`run_lefse(norm="CPM")`, `run_ancom(norm="TSS")`). For the ANOVA, avoid the package's function entirely and use `stats::aov()` directly on the CLR matrix (section 13.2).
+
+### 14.3 `ancombc2()` — degenerate `p`/`q` in `res_pair` with `pairwise` + `dunnet` combined
+
+**Package/version:** `ANCOMBC` (Bioconductor release, not devel — unlike the two above).
+
+**Symptom:** with `pairwise=TRUE` and `dunnet=TRUE` simultaneously, every `p_`/`q_` column in `output_combined$res_pair` comes out exactly `1`, regardless of the actual `W` statistic value.
+
+**Confirmed root cause:** comparing `res` (simple model, no pairwise) row-by-row against `res_pair` for the same nominal coefficient, `lfc`, `se` and `W` are **identical** between the two objects (e.g. W=3.397898 in both), but `p` goes from 0.0094 (correct) to 1 (impossible for that W). The underlying model is the same; something in the joint p-value computation of the `pairwise+dunnet` branch with small n (n=4/group here) returns a degenerate value.
+
+**Fix:** don't use `res_pair` from a combined run. Instead, for each pair of groups, run `ancombc2()` independently and simply (`pairwise=FALSE`, `dunnet=FALSE`, `global=FALSE`) on a subset of just those two groups (`prune_samples()`, section 13.5) — exactly as reliable as the reference run that did work correctly.
+
+### 14.4 `phyloseq::subset_samples()` — non-standard evaluation broken inside a function
+
+**Symptom:** `error evaluating argument 'table' ... object 'level_ref' not found`, when calling `subset_samples(ps, Community %in% c(level_ref, level_other))` inside a user-defined function.
+
+**Root cause:** `subset_samples()` uses non-standard evaluation (NSE) internally and does not correctly resolve variables defined in the calling function's environment — a known phyloseq limitation, not specific to this analysis.
+
+**Fix:** use `prune_samples()` with an explicitly computed logical vector (`sample_data(ps)$Community %in% c(...)`) instead of `subset_samples()`, whenever the subsetting happens inside a function.
+
+### 14.5 `write.csv()` on an S4 `marker_table` object with rows
+
+**Symptom:** `Error in validObject(.Object): invalid class "marker_table" object: marker table must have non-zero dimensions`, when calling `write.csv()` directly on the result of `marker_table()` when there ARE markers (with zero markers, `marker_table()` returns `NULL` and there's no error — different behavior).
+
+**Root cause:** `marker_table` is an S4 class; `write.csv()` internally tries to coerce it to `data.frame`, and that coercion path re-triggers the `marker_table` S4 class validation, which fails at that point in `write.table()`'s pipeline.
+
+**Fix:** explicitly convert with `as(x, "data.frame")` before `write.csv()` (section 13.3) — completely avoids the problematic internal coercion path.
+
+---
+
+## 15. Reproducibility
+
+Still to be included in the final version published alongside the manuscript:
 
 ```r
 sessionInfo()
-# o, si el proyecto usa renv:
+# or, if the project uses renv:
 # renv::snapshot()
 ```
 
-**Resumen de versiones relevantes usadas en este análisis:**
-- `microbiomeMarker` 1.13.2 (Bioconductor devel) — ver bugs documentados en 14.1–14.2
-- `ANCOMBC` (release Bioconductor) — ver bug documentado en 14.3
-- `phyloseq`, `dada2`, `vegan`, `ampvis2`, `UpSetR`, `zCompositions`, `compositions`, `microbiome` — versión exacta pendiente de `sessionInfo()`
+**Summary of relevant versions used in this analysis:**
+- `microbiomeMarker` 1.13.2 (Bioconductor devel) — see bugs documented in 14.1–14.2
+- `ANCOMBC` (Bioconductor release) — see bug documented in 14.3
+- `phyloseq`, `dada2`, `vegan`, `ampvis2`, `UpSetR`, `zCompositions`, `compositions`, `microbiome` — exact version pending `sessionInfo()`
 
-**Datos de entrada:** 12 muestras (4 réplicas × 3 condiciones: pHD17, Dbap, PF), secuenciación 16S V3–V4 (BMK, proyecto BMKO260810-AA254-01-01). Base de datos de referencia: 9 cepas de SkinCom (Lekbua et al. 2024).
+**Input data:** 12 samples (4 replicates × 3 conditions: pHD17, Dbap, PF), 16S V3–V4 sequencing (BMK, project BMKO260810-AA254-01-01). Reference database: 9 SkinCom strains (Lekbua et al. 2024).

@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """
-Pipeline SRA -> FASTQ -> Alineamiento (SINGLE-END) -> BAM ordenado -> WIG
+Pipeline SRA -> FASTQ -> Alignment (SINGLE-END) -> sorted BAM -> WIG
 ====================================================================
-Uso:
-    python pipeline_single_end.py lista_srr.txt
+Usage:
+    python pipeline_single_end.py srr_list.txt
 
-Requisitos (deben estar en el PATH):
+Requirements (must be in PATH):
     - sra-tools (prefetch, fasterq-dump) >= 3.x
     - bowtie2
     - samtools
 
-IMPORTANTE: este script importa wig_utils.py, que debe estar en la
-misma carpeta (contiene las funciones de separación por hebra y
-generación de WIG; no añade dependencias nuevas, todo usa samtools).
+IMPORTANT: this script imports wig_utils.py, which must be in the
+same folder (it contains the strand-splitting and WIG-generation
+functions; it adds no new dependencies, everything uses samtools).
 
-El archivo lista_srr.txt debe tener un accession SRR por línea, ej:
+The srr_list.txt file must have one SRR accession per line, e.g.:
     SRR13200561
     SRR13200562
     SRR13200563
@@ -28,35 +28,35 @@ from datetime import datetime
 
 from wig_utils import split_strands_single_end
 
-# ---------------------- CONFIGURACIÓN (editar aquí) ------------------------
-REF_INDEX = "../F1_index"   # ruta al índice de bowtie2 (sin extensión .bt2)
-THREADS = 4                 # nº de hilos para fasterq-dump / bowtie2 / samtools
-OUTDIR = Path(".")          # carpeta de salida de los FASTQ/SAM/BAM/WIG
-KEEP_FASTQ = False          # True = conservar los .fastq tras alinear
-KEEP_SRA = False            # True = conservar la carpeta con el .sra tras extraer
+# ---------------------- CONFIGURATION (edit here) ------------------------
+REF_INDEX = "../F1_index"   # path to the bowtie2 index (without the .bt2 extension)
+THREADS = 4                 # number of threads for fasterq-dump / bowtie2 / samtools
+OUTDIR = Path(".")          # output folder for FASTQ/SAM/BAM/WIG
+KEEP_FASTQ = False          # True = keep the .fastq files after aligning
+KEEP_SRA = False            # True = keep the folder with the .sra after extracting
 
-# --- Config de cobertura por hebra (stranded coverage) ----------------------
-# 'fr-firststrand'  -> kit dUTP / Illumina TruSeq Stranded (EL MÁS HABITUAL
-#                       comercialmente): el read mapea en la hebra OPUESTA
-#                       a la hebra realmente transcrita.
-# 'fr-secondstrand' -> kit tipo Ligation (menos habitual hoy): el read
-#                       mapea en la MISMA hebra que la transcrita.
-# 'unstranded'      -> no separar por hebra; un único WIG con cobertura total.
+# --- Stranded coverage configuration ----------------------------------------
+# 'fr-firststrand'  -> dUTP kit / Illumina TruSeq Stranded (the MOST COMMON
+#                       commercially available today): the read maps on the
+#                       strand OPPOSITE to the actually transcribed strand.
+# 'fr-secondstrand' -> Ligation-type kit (less common today): the read
+#                       maps on the SAME strand as the transcribed one.
+# 'unstranded'      -> don't split by strand; a single WIG with total coverage.
 #
-# Si no sabes cuál usaste, revisa la ficha del kit de tu proveedor de
-# secuenciación, o comprueba empíricamente con RSeQC (ver wig_utils.py,
-# función infer_experiment.py sobre uno de tus BAM ya generados).
+# If you don't know which one you used, check your sequencing provider's
+# kit datasheet, or check empirically with RSeQC (see wig_utils.py,
+# infer_experiment.py function, on one of your already-generated BAMs).
 LIBRARY_STRAND = "fr-firststrand"
 
-# True = normaliza la cobertura a CPM (counts per million reads mapeados)
-# en vez de profundidad cruda. Útil si vas a comparar el WIG de una
-# muestra con el de otra con distinta profundidad de secuenciación.
+# True = normalizes coverage to CPM (counts per million mapped reads)
+# instead of raw depth. Useful if you're going to compare the WIG of one
+# sample against another with different sequencing depth.
 NORMALIZE_CPM = False
 # -----------------------------------------------------------------------------
 
 
 def log(msg, logfile):
-    """Imprime en pantalla y guarda en el archivo de log."""
+    """Prints to screen and saves to the log file."""
     print(msg)
     with open(logfile, "a") as f:
         f.write(msg + "\n")
@@ -64,9 +64,9 @@ def log(msg, logfile):
 
 def run(cmd, logfile, capture_to=None):
     """
-    Ejecuta un comando externo. Si capture_to se indica, redirige stdout+stderr
-    a ese archivo (equivalente a '> archivo 2>&1' o '2> archivo').
-    Devuelve el código de salida (returncode).
+    Runs an external command. If capture_to is given, redirects stdout+stderr
+    to that file (equivalent to '> file 2>&1' or '2> file').
+    Returns the exit code (returncode).
     """
     log(f"$ {' '.join(cmd)}", logfile)
     if capture_to:
@@ -80,23 +80,23 @@ def run(cmd, logfile, capture_to=None):
 
 def main():
     if len(sys.argv) != 2:
-        print(f"Uso: python {sys.argv[0]} <archivo_lista_srr.txt>")
+        print(f"Usage: python {sys.argv[0]} <srr_list_file.txt>")
         sys.exit(1)
 
     lista_path = Path(sys.argv[1])
     if not lista_path.is_file():
-        print(f"ERROR: no se encuentra el archivo '{lista_path}'")
+        print(f"ERROR: file '{lista_path}' not found")
         sys.exit(1)
 
     OUTDIR.mkdir(parents=True, exist_ok=True)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     logfile = OUTDIR / f"pipeline_log_{timestamp}.txt"
 
-    log(f"=== Pipeline single-end iniciado: {datetime.now()} ===", logfile)
-    log(f"    Modo de hebra (LIBRARY_STRAND): {LIBRARY_STRAND}", logfile)
-    log(f"    Normalización CPM: {NORMALIZE_CPM}", logfile)
+    log(f"=== Single-end pipeline started: {datetime.now()} ===", logfile)
+    log(f"    Strand mode (LIBRARY_STRAND): {LIBRARY_STRAND}", logfile)
+    log(f"    CPM normalization: {NORMALIZE_CPM}", logfile)
 
-    # Leemos la lista, quitando \r (por si el .txt viene de Windows) y líneas vacías
+    # Read the list, stripping \r (in case the .txt comes from Windows) and blank lines
     with open(lista_path, "r") as f:
         sra_list = [line.strip().replace("\r", "") for line in f if line.strip()]
 
@@ -107,14 +107,14 @@ def main():
     for i, srr in enumerate(sra_list, start=1):
         log("", logfile)
         log("=" * 60, logfile)
-        log(f">>> [{i}/{total}] Procesando {srr}", logfile)
+        log(f">>> [{i}/{total}] Processing {srr}", logfile)
         log("=" * 60, logfile)
 
-        # ---------- 1. Descarga (prefetch) ----------
+        # ---------- 1. Download (prefetch) ----------
         run(["prefetch", srr, "-O", str(OUTDIR)], logfile)
         sra_file = OUTDIR / srr / f"{srr}.sra"
         if not sra_file.is_file():
-            log(f"!!! ERROR: prefetch falló para {srr}, se omite.", logfile)
+            log(f"!!! ERROR: prefetch failed for {srr}, skipping.", logfile)
             fail += 1
             continue
 
@@ -126,14 +126,14 @@ def main():
         fastq = OUTDIR / f"{srr}.fastq"
         if not fastq.is_file():
             log(
-                f"!!! ERROR: fasterq-dump no generó {fastq} "
-                f"(¿es realmente single-end?), se omite {srr}.",
+                f"!!! ERROR: fasterq-dump did not generate {fastq} "
+                f"(is it really single-end?), skipping {srr}.",
                 logfile,
             )
             fail += 1
             continue
 
-        # ---------- 3. Alineamiento con bowtie2 (single-end) ----------
+        # ---------- 3. Alignment with bowtie2 (single-end) ----------
         sam = OUTDIR / f"{srr}.sam"
         summary = OUTDIR / f"{srr}_bowtie2_summary.txt"
 
@@ -148,18 +148,18 @@ def main():
         )
 
         if not sam.is_file() or sam.stat().st_size == 0:
-            log(f"!!! ERROR: bowtie2 no generó SAM para {srr}, se omite.", logfile)
+            log(f"!!! ERROR: bowtie2 did not generate a SAM for {srr}, skipping.", logfile)
             fail += 1
             continue
 
-        log(f"Resumen bowtie2 ({srr}):", logfile)
+        log(f"Bowtie2 summary ({srr}):", logfile)
         with open(summary) as f:
             log(f.read(), logfile)
 
-        # ---------- 4. SAM -> BAM ordenado e indexado ----------
+        # ---------- 4. SAM -> sorted, indexed BAM ----------
         bam = OUTDIR / f"{srr}_sorted.bam"
 
-        # samtools view -F 4 (quita no-mapeados) | samtools sort
+        # samtools view -F 4 (removes unmapped) | samtools sort
         view_proc = subprocess.Popen(
             ["samtools", "view", "-@", str(THREADS), "-b", "-F", "4", str(sam)],
             stdout=subprocess.PIPE,
@@ -174,18 +174,18 @@ def main():
 
         run(["samtools", "index", str(bam)], logfile)
 
-        # ---------- 5. BAM -> WIG (cobertura, separada por hebra) ----------
+        # ---------- 5. BAM -> WIG (coverage, split by strand) ----------
         try:
             wig_files = split_strands_single_end(
                 bam, srr, THREADS, LIBRARY_STRAND, normalize_cpm=NORMALIZE_CPM
             )
             for w in wig_files:
-                log(f"    WIG generado -> {w}", logfile)
+                log(f"    WIG generated -> {w}", logfile)
         except Exception as e:
-            log(f"!!! ERROR generando WIG para {srr}: {e}", logfile)
-            # No se marca como fallo total: el BAM sí se generó correctamente.
+            log(f"!!! ERROR generating WIG for {srr}: {e}", logfile)
+            # Not marked as a total failure: the BAM was generated correctly.
 
-        # ---------- 6. Limpieza ----------
+        # ---------- 6. Cleanup ----------
         sam.unlink(missing_ok=True)
 
         if not KEEP_FASTQ:
@@ -194,13 +194,13 @@ def main():
         if not KEEP_SRA:
             shutil.rmtree(OUTDIR / srr, ignore_errors=True)
 
-        log(f">>> {srr} completado -> {bam}", logfile)
+        log(f">>> {srr} completed -> {bam}", logfile)
         ok += 1
 
     log("", logfile)
-    log(f"=== Pipeline finalizado: {datetime.now()} ===", logfile)
-    log(f"Completados correctamente: {ok} / {total}", logfile)
-    log(f"Fallidos: {fail} / {total}", logfile)
+    log(f"=== Pipeline finished: {datetime.now()} ===", logfile)
+    log(f"Completed successfully: {ok} / {total}", logfile)
+    log(f"Failed: {fail} / {total}", logfile)
 
 
 if __name__ == "__main__":

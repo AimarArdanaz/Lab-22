@@ -2,60 +2,61 @@
 """
 wig_utils.py
 ====================================================================
-Funciones compartidas por pipeline_single_end.py y pipeline_paired_end.py
-para separar un BAM ordenado en hebras (+ / -) y convertir la cobertura
-resultante a formato WIG (variableStep).
+Functions shared by pipeline_single_end.py and pipeline_paired_end.py
+to split a sorted BAM into strands (+ / -) and convert the resulting
+coverage into WIG format (variableStep).
 
-Este archivo debe estar en la MISMA carpeta que esos dos scripts,
-ya que ambos hacen `from wig_utils import ...`.
+This file must be in the SAME folder as those two scripts,
+since both do `from wig_utils import ...`.
 
-No añade dependencias nuevas: todo se hace con `samtools`, que ya
-tenías instalado para el resto del pipeline.
+No new dependencies added: everything is done with `samtools`, which
+you already had installed for the rest of the pipeline.
 
 --------------------------------------------------------------------
-¿QUÉ ES "STRANDED COVERAGE" Y POR QUÉ SE HACE ASÍ AQUÍ?
+WHAT IS "STRANDED COVERAGE" AND WHY IS IT DONE THIS WAY HERE?
 --------------------------------------------------------------------
-Cuando secuencias RNA-seq con un kit "stranded", cada read conserva
-la información de qué hebra del ADN se transcribió originalmente.
-Bowtie2 marca en el FLAG del SAM/BAM si un read mapeó en la hebra +
-o en la hebra - (bit 0x10, valor 16 del flag).
+When you sequence RNA-seq with a "stranded" kit, each read retains
+information about which DNA strand was originally transcribed.
+Bowtie2 flags in the SAM/BAM FLAG whether a read mapped to the +
+strand or the - strand (bit 0x10, value 16 of the flag).
 
-PERO el bit 16 del flag NO es directamente "la hebra transcrita" en
-todos los protocolos:
+BUT bit 16 of the flag is NOT directly "the transcribed strand" in
+every protocol:
 
-- Kits tipo dUTP / Illumina TruSeq Stranded mRNA (LOS MÁS HABITUALES
-  hoy en día comercialmente): el read que secuencias es
-  COMPLEMENTARIO a la hebra molde original -> hay que INVERTIR la
-  hebra de mapeo para saber la hebra transcrita real.
-  Esto es lo que aquí llamamos 'fr-firststrand'.
+- dUTP kits / Illumina TruSeq Stranded mRNA (the MOST COMMON kits
+  commercially today): the read you sequence is COMPLEMENTARY to
+  the original template strand -> you have to INVERT the mapping
+  strand to get the real transcribed strand.
+  This is what we call 'fr-firststrand' here.
 
-- Kits antiguos tipo "Ligation" (poco habituales ya): el read SÍ
-  coincide con la hebra transcrita tal cual mapea.
-  Esto es lo que aquí llamamos 'fr-secondstrand'.
+- Older "Ligation" kits (rare nowadays): the read DOES match the
+  transcribed strand as mapped.
+  This is what we call 'fr-secondstrand' here.
 
-- Si tu librería no es "stranded" (protocolo genómico estándar, o
-  RNA-seq no direccional), no hay hebra que recuperar: usa
-  'unstranded' y se genera un único WIG con la cobertura total.
+- If your library isn't "stranded" (standard genomic protocol, or
+  non-directional RNA-seq), there's no strand to recover: use
+  'unstranded' and a single WIG with total coverage is generated.
 
-SI NO SABES CUÁL DE LOS DOS USASTE (dUTP vs Ligation), la forma más
-fiable de comprobarlo es correr UNA VEZ la herramienta
-`infer_experiment.py` del paquete RSeQC sobre uno de tus BAM ya
-alineados, usando una anotación de tu genoma en formato BED:
+IF YOU DON'T KNOW WHICH OF THE TWO YOU USED (dUTP vs Ligation), the
+most reliable way to check is to run the RSeQC package's
+`infer_experiment.py` tool ONCE on one of your already-aligned BAMs,
+using a BED annotation of your genome:
 
     pip install RSeQC
-    infer_experiment.py -i SRRxxxx_sorted.bam -r anotacion.bed
+    infer_experiment.py -i SRRxxxx_sorted.bam -r annotation.bed
 
-Te devuelve el % de reads consistentes con cada convención: el que
-tenga el porcentaje alto (normalmente >80-90%) es tu protocolo real.
-Para bacterias, puedes generar el BED a partir del GFF de Prokka/NCBI
-(hay conversores como `gff2bed` de BEDOPS).
+It returns the % of reads consistent with each convention: whichever
+has the high percentage (usually >80-90%) is your real protocol.
+For bacteria, you can generate the BED from a Prokka/NCBI GFF (there
+are converters like BEDOPS's `gff2bed`).
 
-¿Por qué te importa esto para tu tesis? Porque en genomas bacterianos
-los genes están muy empaquetados en ambas hebras, con solapamientos
-y antisentido frecuentes -- justo el caso de islas de patogenicidad
-como la PAI de E. faecalis, donde está esp. Sin separar por hebra no
-puedes saber si la señal de cobertura pertenece al gen de interés o
-a algo solapante en la hebra opuesta.
+Why does this matter for your thesis? Because in bacterial genomes
+genes are very tightly packed on both strands, with frequent overlaps
+and antisense arrangements -- exactly the case for pathogenicity
+islands like the PAI of E. faecalis, where esp is located. Without
+splitting by strand you can't tell whether the coverage signal
+belongs to the gene of interest or to something overlapping on the
+opposite strand.
 --------------------------------------------------------------------
 """
 
@@ -64,14 +65,14 @@ from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
-# Utilidades de bajo nivel sobre samtools
+# Low-level samtools utilities
 # ---------------------------------------------------------------------------
 
 def _samtools_view_filter(input_bam, flag_f, flag_F, output_bam, threads):
     """
-    Escribe en output_bam los reads de input_bam que cumplan:
-      - flag_f: bits que DEBEN estar presentes (samtools -f), o None
-      - flag_F: bits que NO deben estar presentes (samtools -F), o None
+    Writes to output_bam the reads from input_bam that satisfy:
+      - flag_f: bits that MUST be present (samtools -f), or None
+      - flag_F: bits that must NOT be present (samtools -F), or None
     """
     cmd = ["samtools", "view", "-@", str(threads), "-b"]
     if flag_f is not None:
@@ -85,9 +86,9 @@ def _samtools_view_filter(input_bam, flag_f, flag_F, output_bam, threads):
 
 def _merge_bams(bam_list, output_bam, threads):
     """
-    Fusiona 2+ BAMs ya ordenados por coordenadas en uno solo,
-    conservando el orden (todos proceden del mismo BAM ordenado
-    original, así que el resultado sigue ordenado sin re-sortear).
+    Merges 2+ already coordinate-sorted BAMs into one, preserving
+    order (they all come from the same original sorted BAM, so the
+    result stays sorted without re-sorting).
     """
     cmd = ["samtools", "merge", "-f", "-@", str(threads), str(output_bam)]
     cmd += [str(b) for b in bam_list]
@@ -96,10 +97,10 @@ def _merge_bams(bam_list, output_bam, threads):
 
 def compute_scale_factor(bam_path, threads=4):
     """
-    Devuelve el factor de escala para normalizar a CPM
-    (Counts Per Million reads mapeados): 1e6 / total_reads_mapeados.
-    Se calcula sobre el BAM completo (no por hebra), para que las
-    hebras + y - de una misma muestra queden en la misma escala.
+    Returns the scale factor to normalize to CPM
+    (Counts Per Million mapped reads): 1e6 / total_mapped_reads.
+    Computed on the whole BAM (not per strand), so that the + and -
+    strands of the same sample end up on the same scale.
     """
     result = subprocess.run(
         ["samtools", "view", "-@", str(threads), "-c", "-F", "4", str(bam_path)],
@@ -113,15 +114,15 @@ def compute_scale_factor(bam_path, threads=4):
 
 def bam_to_wig(bam_path, wig_path, threads=4, scale_factor=1.0, track_name=None):
     """
-    Convierte un BAM (ya filtrado/ordenado) a un WIG (variableStep,
-    span=1) con la profundidad de cobertura por posición.
+    Converts a (already filtered/sorted) BAM into a WIG (variableStep,
+    span=1) with per-position coverage depth.
 
-    Solo se escriben posiciones con profundidad > 0 (comportamiento
-    por defecto de 'samtools depth'), lo cual es válido en formato
-    WIG: las posiciones no listadas se interpretan como sin datos.
+    Only positions with depth > 0 are written (default behavior of
+    'samtools depth'), which is valid in WIG format: positions not
+    listed are interpreted as having no data.
 
-    Si scale_factor != 1.0, los valores se normalizan (p.ej. a CPM)
-    en vez de escribir la profundidad cruda.
+    If scale_factor != 1.0, values are normalized (e.g. to CPM)
+    instead of writing raw depth.
     """
     name = track_name or Path(wig_path).stem
     proc = subprocess.Popen(
@@ -145,33 +146,33 @@ def bam_to_wig(bam_path, wig_path, threads=4, scale_factor=1.0, track_name=None)
 
     proc.wait()
     if proc.returncode != 0:
-        raise RuntimeError(f"samtools depth falló para {bam_path}")
+        raise RuntimeError(f"samtools depth failed for {bam_path}")
 
 
 # ---------------------------------------------------------------------------
-# Separación por hebra: SINGLE-END
+# Strand splitting: SINGLE-END
 # ---------------------------------------------------------------------------
 
 def split_strands_single_end(sorted_bam, prefix, threads, library_strand,
                               normalize_cpm=False):
     """
-    Genera el/los WIG de cobertura a partir de un BAM single-end
-    ya ordenado e indexado.
+    Generates the coverage WIG(s) from an already sorted and indexed
+    single-end BAM.
 
-    Para un read individual, la hebra de mapeo se lee directamente
-    del flag 16 (0x10 = alineado en hebra reversa):
-      - flag 16 NO presente -> read mapeado en hebra +
-      - flag 16 presente    -> read mapeado en hebra -
+    For an individual read, the mapping strand is read directly from
+    flag 16 (0x10 = aligned on the reverse strand):
+      - flag 16 NOT present -> read mapped on strand +
+      - flag 16 present     -> read mapped on strand -
 
     library_strand:
-      'fr-firststrand'  -> kit dUTP / TruSeq Stranded (el más común):
-                            la hebra de mapeo está INVERTIDA respecto
-                            a la hebra transcrita real.
-      'fr-secondstrand' -> kit tipo Ligation: la hebra de mapeo
-                            coincide con la hebra transcrita.
-      'unstranded'      -> no se separa; un único WIG con cobertura total.
+      'fr-firststrand'  -> dUTP / TruSeq Stranded kit (the most common):
+                            the mapping strand is INVERTED relative
+                            to the real transcribed strand.
+      'fr-secondstrand' -> Ligation-type kit: the mapping strand
+                            matches the transcribed strand.
+      'unstranded'      -> no splitting; a single WIG with total coverage.
 
-    Devuelve la lista de Path a los WIG generados.
+    Returns the list of Paths to the generated WIGs.
     """
     sorted_bam = Path(sorted_bam)
     outdir = sorted_bam.parent
@@ -182,16 +183,16 @@ def split_strands_single_end(sorted_bam, prefix, threads, library_strand,
         bam_to_wig(sorted_bam, wig, threads, scale, track_name=prefix)
         return [wig]
 
-    fwd_bam = outdir / f"{prefix}_fwdmapped.tmp.bam"  # reads mapeados en hebra +
-    rev_bam = outdir / f"{prefix}_revmapped.tmp.bam"  # reads mapeados en hebra -
+    fwd_bam = outdir / f"{prefix}_fwdmapped.tmp.bam"  # reads mapped on strand +
+    rev_bam = outdir / f"{prefix}_revmapped.tmp.bam"  # reads mapped on strand -
 
-    # -F 20 = excluye unmapped(4) y reverse(16)  -> deja solo mapeados en +
+    # -F 20 = excludes unmapped(4) and reverse(16)  -> leaves only + mapped reads
     _samtools_view_filter(sorted_bam, None, 20, fwd_bam, threads)
-    # -f 16 = exige reverse(16)                  -> deja solo mapeados en -
+    # -f 16 = requires reverse(16)                  -> leaves only - mapped reads
     _samtools_view_filter(sorted_bam, 16, None, rev_bam, threads)
 
     if library_strand == "fr-firststrand":
-        # el mapeo está invertido respecto a la hebra transcrita real
+        # the mapping is inverted relative to the real transcribed strand
         plus_source, minus_source = rev_bam, fwd_bam
     else:  # fr-secondstrand
         plus_source, minus_source = fwd_bam, rev_bam
@@ -208,30 +209,30 @@ def split_strands_single_end(sorted_bam, prefix, threads, library_strand,
 
 
 # ---------------------------------------------------------------------------
-# Separación por hebra: PAIRED-END
+# Strand splitting: PAIRED-END
 # ---------------------------------------------------------------------------
 
 def split_strands_paired_end(sorted_bam, prefix, threads, library_strand,
                               normalize_cpm=False):
     """
-    Igual que split_strands_single_end pero para paired-end.
+    Same as split_strands_single_end but for paired-end.
 
-    En paired-end la hebra de origen del FRAGMENTO no se lee de un
-    solo read: hay que combinar el flag de los dos mates (esto es lo
-    que en herramientas como RSeQC se conoce como la convención
-    '1+-,1-+,2++,2--' / '1++,1--,2+-,2-+'):
+    In paired-end, the FRAGMENT's strand of origin isn't read from a
+    single read: the flags of both mates need to be combined (this is
+    what tools like RSeQC call the
+    '1+-,1-+,2++,2--' / '1++,1--,2+-,2-+' convention):
 
-      reads_A = (mate2 mapeado en +) O (mate1 mapeado en -)
-      reads_B = (mate2 mapeado en -) O (mate1 mapeado en +)
+      reads_A = (mate2 mapped on +) OR (mate1 mapped on -)
+      reads_B = (mate2 mapped on -) OR (mate1 mapped on +)
 
-    Con 'fr-firststrand' (dUTP, el caso más común), reads_A
-    corresponde a la hebra + transcrita real; con 'fr-secondstrand'
-    es al revés.
+    With 'fr-firststrand' (dUTP, the most common case), reads_A
+    corresponds to the real transcribed + strand; with
+    'fr-secondstrand' it's the other way round.
 
-    Flags SAM usados:
+    SAM flags used:
       64  = mate1 (first in pair)
       128 = mate2 (second in pair)
-      16  = alineado en hebra reversa
+      16  = aligned on the reverse strand
     """
     sorted_bam = Path(sorted_bam)
     outdir = sorted_bam.parent
