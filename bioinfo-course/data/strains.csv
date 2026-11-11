@@ -1,0 +1,11 @@
+strain,origin,bap,esp
+C01,clinical,1,0
+C02,clinical,1,1
+C03,commensal,0,0
+C04,clinical,0,1
+C05,commensal,1,0
+C06,clinical,1,1
+C07,commensal,0,0
+C08,clinical,1,0
+C09,commensal,0,1
+C10,clinical,1,1
