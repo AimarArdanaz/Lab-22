@@ -9,7 +9,8 @@ What it does, in order:
   3. If you tell it which lanes are the marker and which ladder you used, it
      fits a line log10(size) = a + b * (migration distance) and uses it to
      estimate the size of the sample bands.
-  4. Optionally saves an enhanced version of the image for a figure.
+  4. Optionally draws an annotated figure ready for a presentation, or saves
+     an enhanced version of the image.
 
 Why a log-linear fit: in an agarose gel, within the size range it resolves
 well, the distance a fragment migrates is roughly proportional to the
@@ -30,6 +31,7 @@ Usage:
     python measure_gel.py photo.jpg                        # detect bands only
     python measure_gel.py photo.jpg --markers 1 4 \
         --ladder 5000 4000 3000 2000 1500 1000 700 500
+    python measure_gel.py photo.jpg --markers 2 --figure annotated.png
     python measure_gel.py photo.jpg --enhance output.png
 
 Requirements: Python 3 with numpy and Pillow.
@@ -37,7 +39,7 @@ Requirements: Python 3 with numpy and Pillow.
 import argparse
 import itertools
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 
 # Known ladders: sizes in bp from largest to smallest, and which ones are the
 # reference bands (the ones the manufacturer makes brighter for orientation).
@@ -237,6 +239,131 @@ def assign_ladder(marker_bands, ladder, reference, max_comb=400000):
     return chosen, r2, anchored, mismatch
 
 
+FONTS = ("/System/Library/Fonts/Supplemental/Arial.ttf",
+         "/System/Library/Fonts/Supplemental/Arial Bold.ttf")
+
+
+def _font(size, bold=False):
+    try:
+        return ImageFont.truetype(FONTS[1 if bold else 0], size)
+    except OSError:
+        return ImageFont.load_default()
+
+
+def annotated_figure(a, dest, lanes, indices, strip, y_start, y_end,
+                     bands, assignments, markers, calibration, reference, arrows,
+                     scale=3.2, gamma=0.6, title="", number_from=None):
+    """Draws the figure ready for a presentation.
+
+    It contains: the enhanced crop of the lanes with signal, the number of each
+    lane, a scale with the marker sizes on the left (reference bands
+    highlighted), the estimated size next to each band, and the arrows
+    requested with --arrow.
+    """
+    sep = np.median(np.diff(lanes)) if len(lanes) > 1 else 70
+    xs = [lanes[i - 1] for i in indices]
+    x0 = max(0, int(min(xs) - sep * 0.55))
+    x1 = min(a.shape[1], int(max(xs) + sep * 0.55))
+    y0 = max(0, strip[0] - 12)
+    y1 = min(a.shape[0], y_end + 10)
+
+    c = a[y0:y1, x0:x1]
+    lo, hi = np.percentile(c, 1), np.percentile(c, 99.8)
+    c = np.clip((c - lo) / (hi - lo), 0, 1) ** gamma
+    gel = Image.fromarray((c * 255).astype("uint8")).convert("RGB")
+    GW, GH = int((x1 - x0) * scale), int((y1 - y0) * scale)
+    gel = gel.resize((GW, GH), Image.LANCZOS)
+
+    LEFT, TOP, RIGHT, BOTTOM = 150, 62, (430 if arrows else 120), 46
+    canvas = Image.new("RGB", (LEFT + GW + RIGHT, TOP + GH + BOTTOM), "white")
+    canvas.paste(gel, (LEFT, TOP))
+    d = ImageDraw.Draw(canvas)
+    F, FB, FS, FSB = _font(23), _font(25, True), _font(19), _font(21, True)
+    TEAL, TERRA, GREY, BLACK = (2, 128, 144), (200, 86, 58), (110, 110, 118), (25, 30, 35)
+
+    cx = lambda ox: LEFT + (ox - x0) * scale
+    cy = lambda oy: TOP + (oy - y0) * scale
+
+    # lane number, and "M" under the marker lanes.
+    # --number-from is for when the script detects comb teeth that were not
+    # loaded: you call "lane 1" the first one you loaded, not the first tooth
+    # of the comb.
+    offset = (number_from - indices[0]) if number_from is not None else 0
+    for i in indices:
+        xc = lanes[i - 1]
+        d.text((cx(xc), TOP - 44), str(i + offset), font=FB,
+               fill=(TEAL if i in markers else BLACK), anchor="mm")
+        if i in markers:
+            d.text((cx(xc), TOP - 19), "M", font=FS, fill=GREY, anchor="mm")
+
+    # size scale on the left, taken from the marker lane used
+    ref = set(reference)
+    if assignments:
+        m = sorted(assignments)[0]
+        for y, _hh, s in assignments[m]:
+            yy = cy(y)
+            is_ref = s in ref
+            d.line([(LEFT - 14, yy), (LEFT - 4, yy)],
+                   fill=(TEAL if is_ref else GREY), width=2)
+            d.text((LEFT - 20, yy), f"{s:,}".replace(",", " "),
+                   font=(FSB if is_ref else FS),
+                   fill=(TEAL if is_ref else GREY), anchor="rm")
+        d.text((LEFT - 20, cy(y_start) - 26), "bp", font=FS, fill=GREY, anchor="rm")
+
+    # estimated size next to each band of the sample lanes.
+    # Only what is inside the range calibrated by the marker is labelled:
+    # outside it the estimate is an extrapolation and printing a number would
+    # give it a precision it does not have. Bands that already have an arrow
+    # are not labelled either.
+    a0, b0, y_w = calibration if calibration else (None, None, None)
+    with_arrow = set()
+    for (lane, y_target, _txt) in arrows:
+        bs = bands.get(lane, [])
+        if bs:
+            with_arrow.add((lane, min(bs, key=lambda b: abs(b[0] - y_target))[0]))
+    size_range = None
+    if assignments:
+        all_sizes = [s for asg in assignments.values() for _y, _h, s in asg]
+        size_range = (min(all_sizes), max(all_sizes))
+    for i in indices:
+        if i in markers or a0 is None:
+            continue
+        for y, _hh in bands.get(i, []):
+            if (i, y) in with_arrow or y - strip[1] < 15:
+                continue
+            size = 10 ** (a0 + b0 * (y - y_w))
+            if size_range and not (size_range[0] <= size <= size_range[1]):
+                continue
+            txt = f"{size/1000:.2f} kb" if size >= 1000 else f"{size:.0f} bp"
+            d.text((cx(lanes[i - 1]) + sep * scale * 0.42, cy(y)), txt,
+                   font=FS, fill=(255, 255, 255), anchor="lm",
+                   stroke_width=3, stroke_fill=(0, 0, 0))
+
+    # arrows requested by hand
+    for (lane, y_target, text) in arrows:
+        bs = bands.get(lane, [])
+        if not bs:
+            continue
+        y = min(bs, key=lambda b: abs(b[0] - y_target))[0]
+        yy = cy(y)
+        xi = cx(lanes[lane - 1] + sep * 0.42) + 12
+        xf = LEFT + GW + 40
+        d.line([(xi, yy), (xf, yy)], fill=TERRA, width=4)
+        d.polygon([(xi, yy), (xi + 16, yy - 9), (xi + 16, yy + 9)], fill=TERRA)
+        sub = ""
+        if a0 is not None:
+            size = 10 ** (a0 + b0 * (y - y_w))
+            sub = f"≈ {size/1000:.2f} kb measured" if size >= 1000 else f"≈ {size:.0f} bp measured"
+        d.text((xf + 12, yy - 14 if sub else yy), text, font=FB, fill=TERRA, anchor="lm")
+        if sub:
+            d.text((xf + 12, yy + 13), sub, font=FS, fill=GREY, anchor="lm")
+
+    if title:
+        d.text((LEFT, TOP + GH + 16), title, font=FS, fill=GREY)
+    canvas.save(dest)
+    return dest
+
+
 def enhance(a, crop, scale, gamma, dest):
     y0, y1, x0, x1 = crop
     c = a[y0:y1, x0:x1]
@@ -277,8 +404,24 @@ def main():
                          "they are all visible")
     ap.add_argument("--invert", choices=["auto", "yes", "no"], default="auto",
                     help="for negative photos (dark bands on a light background)")
+    ap.add_argument("--figure", metavar="OUTPUT.png",
+                    help="save the annotated figure ready to present: enhanced crop, "
+                         "lane numbers, marker size scale and the estimated size "
+                         "next to each band")
+    ap.add_argument("--arrow", action="append", default=[], metavar="LANE,Y,TEXT",
+                    help="add a labelled arrow to a band, e.g. "
+                         "--arrow \"3,332,BacA + GFP\". Y is approximate: it snaps "
+                         "to the nearest detected band. Repeatable")
+    ap.add_argument("--figure-lanes", nargs="*", type=int, default=None,
+                    help="which lanes appear in the figure; by default, those "
+                         "with at least one band")
+    ap.add_argument("--number-from", type=int, default=None, metavar="N",
+                    help="number given in the figure to the first lane drawn. "
+                         "Useful when the script detects comb teeth you did not "
+                         "load and its numbering does not match yours")
+    ap.add_argument("--title", default="", help="figure caption")
     ap.add_argument("--enhance", metavar="OUTPUT.png",
-                    help="save an enhanced version for a figure")
+                    help="save only the enhanced crop, without annotations")
     ap.add_argument("--crop", nargs=4, type=int, metavar=("Y0", "Y1", "X0", "X1"))
     ap.add_argument("--scale", type=float, default=3.2)
     ap.add_argument("--gamma", type=float, default=0.6)
@@ -334,6 +477,7 @@ def main():
                 print(f"    y = {y:4d}   height = {hh:6.2f}   "
                       f"migration = {y - y_well:5.1f} px{near}")
 
+    calibration, reference, assignments = None, [], {}
     if args.markers:
         # --ladder accepts a name from the catalogue or the sizes by hand
         if len(args.ladder) == 1 and not args.ladder[0].replace(".", "").isdigit():
@@ -373,6 +517,7 @@ def main():
                     continue
                 chosen, r2_lane, anchored, mismatch = res
 
+            assignments[n] = chosen
             print(f"\nlane {n} — assignment" +
                   (f" (R² = {r2_lane:.4f}, {anchored} of {len(reference)} reference "
                    f"bands anchored by brightness)" if r2_lane is not None else ""))
@@ -400,6 +545,7 @@ def main():
 
         if d:
             a0, b0, r2 = fit_loglinear(d, t_bp)
+            calibration = (a0, b0, y_well)
             print(f"\nlog-linear fit with {len(d)} marker bands: R² = {r2:.4f}")
             if r2 < 0.98:
                 print("    [warning] low R²: do not trust the sizes below")
@@ -415,8 +561,27 @@ def main():
                         outside = "   [outside the calibrated range: weak estimate]"
                     print(f"    lane {i:2d}   y = {int(y):4d}   ≈ {size:8.0f} bp{outside}")
 
+    if args.figure:
+        indices = args.figure_lanes or [i for i in range(1, len(lanes) + 1)
+                                        if bands.get(i)]
+        if not indices:
+            print("\n[warning] no lanes with bands: the figure is not drawn")
+        else:
+            arrows = []
+            for f in args.arrow:
+                try:
+                    c, y, txt = f.split(",", 2)
+                    arrows.append((int(c), int(y), txt.strip()))
+                except ValueError:
+                    raise SystemExit(f"badly written --arrow: {f!r}. "
+                                     f"Format: LANE,Y,TEXT")
+            print("\nfigure ->", annotated_figure(
+                a, args.figure, lanes, indices, strip, y_start, y_end,
+                bands, assignments, args.markers, calibration, reference, arrows,
+                args.scale, args.gamma, args.title, args.number_from))
+
     if args.enhance:
-        crop = args.crop or [0, height, 0, width]
+        crop =args.crop or [0, height, 0, width]
         print("\nenhanced ->", enhance(a, crop, args.scale, args.gamma, args.enhance))
 
 
